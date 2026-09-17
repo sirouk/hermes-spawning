@@ -10,7 +10,8 @@ project.
 
 ```bash
 cd /root/hermes-spawning
-./hermes-spawn.sh spawn
+./deploy.sh                 # one-time per host: the model endpoint
+./hermes-spawn.sh spawn     # create an instance (fleet defaults are applied)
 ```
 
 The wizard asks for:
@@ -63,8 +64,86 @@ Useful commands:
 ./hermes-spawn.sh credentials HOSTNAME
 ./hermes-spawn.sh reauth HOSTNAME
 ./hermes-spawn.sh update HOSTNAME
+./hermes-spawn.sh apply-stack HOSTNAME [--restart]
+./hermes-spawn.sh stack-status HOSTNAME
 ./hermes-spawn.sh stop HOSTNAME
 ```
+
+## Host model stack (deploy.sh)
+
+`deploy.sh` provisions one reliable endpoint on this host that every instance
+shares. It is idempotent - re-run it any time something breaks, or run
+`./deploy.sh --verify-only` for a non-destructive audit.
+
+What it sets up and repairs:
+
+1. **CCS + CLIProxyAPI** on port `8317`: `npm i -g @kaitranntt/ccs` and
+   `ccs cliproxy --latest`.
+2. **OAuth** for both upstream providers, with operator guidance and
+   skip-already-authed logic: `ccs codex --auth` (ChatGPT Pro, serves
+   `gpt-6-astra`) and `ccs claude --auth` (Anthropic, serves `claude-opus-5`
+   and the Claude family).
+3. **Chutes** as an OpenAI-compatible upstream (`openai-compatibility:` block
+   appended to `~/.ccs/cliproxy/config.yaml` with 2-space-indented list items -
+   CCS regenerates the config and silently drops unindented hand-written
+   lists). Model aliases: `kimi-k3`, `kimi-k2.6`, `glm-5.2`, `deepseek-v3.2`,
+   `deepseek-v4-flash-0731`.
+4. **One bearer key for the fleet** (`hermes-fleet-...`) in the proxy's
+   `api-keys`, stored (mode `0600`, git-ignored) in `.model-endpoint`, which
+   also records `MODEL_STACK_BASE_URL=http://<host-tailscale-ip>:8317/v1`.
+5. **systemd persistence** (`ccs-cliproxy.service`, oneshot) so the endpoint
+   comes back on reboot.
+6. Optional registration of the endpoint in `~/.prime/agent/models.json`
+   (`--with-prime-models` or answer yes at the prompt).
+
+OAuth accounts over quota return straight `429`s; the endpoint does not swap
+models for you. The reliability story lives at the instance layer: Hermes'
+own fallback chain (below) walks to the next model.
+
+Non-interactive run: `./deploy.sh --yes` (accepts defaults; answers every
+prompt with its default, so OAuth is *verified* but can only be minted
+interactively). Force both OAuth logins again with `./deploy.sh --reauth`.
+
+## Fleet defaults applied on spawn
+
+`stack-defaults.yaml` is the single source of truth. `hermes-spawn.sh spawn`
+applies it to the new default profile; `./hermes-spawn.sh apply-stack
+[instance] [--restart]` (idempotent) applies it to an existing instance
+(default + every persona); `./hermes-spawn.sh stack-status [instance]` audits
+on disk and exits non-zero on any drift. Re-run `apply-stack` after adding
+personas to an instance.
+
+- **Primary model**: `gpt-6-astra` (high) via `custom:ccs-astra`.
+- **Fallback chain** (walked on rate-limit/overload/connection errors):
+  `claude-opus-5` (max) via `custom:ccs-anthropic` → `kimi-k3` (max) via
+  `custom:ccs-kimi` → `deepseek-v4-flash-0731` (max) via `custom:ccs-deepseek`
+  → `glm-5.2` (max) via `custom:ccs-glm`.
+- **Auxiliaries**: `claude-haiku-4-5-20251001` via `custom:ccs-anthropic` on
+  all 8 auxiliary tasks, every persona.
+- **Scheduled jobs**: `cron.model`/`cron.model_provider` are left null, so
+  jobs inherit the persona config. A job that needs a specific model for
+  optimal performance may pin `model`/`provider` on the job itself; such pins
+  are preserved and reported by `stack-status`.
+- **YOLO**: `approvals.mode: 'off'` on every persona + default, verified on
+  disk. Stray `model.api_key`/`model.api_mode` leftovers from retired
+  providers are removed (they would fight the provider entry).
+- **Reactions**: off everywhere - YAML (`discord.reactions`,
+  `telegram.reactions`, `slack/matrix/mattermost` extras,
+  `display.message_reactions`) plus the winning env layer
+  (`TELEGRAM_REACTIONS=false`, etc. per-persona `.env`).
+- **Expand thinking**: on for every persona (`display.show_reasoning: true`,
+  `display.thinking_mode: full`, `display.details_mode: expanded`).
+- **Backends**: when an instance has more than one persona the default
+  profile's gateway is configured for multiplexing
+  (`gateway.multiplex_profiles: true`, `auto_multiplex_migration: true`) and
+  fleet capacity is sized from the persona count N:
+  `gateway.api_server.max_concurrent_runs = clamp(2N, 10, 32)` and
+  `max_live_sessions = min(N+8, 128)`.
+
+The endpoint recorded per instance in `control.env`
+(`MODEL_STACK_BASE_URL`/`MODEL_STACK_API_KEY`) is refreshed on every apply.
+
+## Files (model stack)
 
 Instance files live in `instances/HOSTNAME/`. Back up `hermes-data/` to retain
 the agent configuration, sessions, memories, skills, and profile state. Back up
@@ -121,8 +200,13 @@ pair in its own VM as an additional boundary.
 
 ## Files
 
+- `deploy.sh` — one-endpoint host model stack, interactive and idempotent.
+- `stack-defaults.yaml` — fleet default values applied to every instance.
+- `lib/apply_stack.py` — merge/audit engine used by apply-stack/stack-status.
+- `.model-endpoint` — ignored mode-`0600` fleet endpoint + bearer key.
 - `compose.yaml` — hardened two-container template shared by every instance.
 - `hermes-spawn.sh` — provisioning and lifecycle interface.
+
 - `.tailscale-authkey.example` — non-secret template for the administrator.
 - `.tailscale-authkey` — ignored mode-`0600` reusable enrollment credential.
 - `instances/HOSTNAME/control.env` — generated Compose controls (mode `0600`).

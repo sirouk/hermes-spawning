@@ -1,0 +1,165 @@
+# =============================================================================
+# Fleet model-stack defaults — single source of truth for this repository.
+#
+# Read by:
+#   deploy.sh                 (host verification: required models, ports, layers)
+#   lib/apply_stack.py        (writes/audits these values into every Hermes
+#                              instance's default + persona configs)
+#   hermes-spawn.sh apply-stack / stack-status
+#
+# The one endpoint everything talks through is the host CLIProxy, managed by
+# CCS: http://<host-tailscale-ip>:<endpoint.port>/v1 with a bearer API key
+# (deploy.sh mints a dedicated fleet key and records it in .model-endpoint).
+# =============================================================================
+version: 1
+
+endpoint:
+  port: 8317
+  path: /v1
+  # Fallback auth key if deploy.sh never ran (CCS's built-in passthrough key).
+  fallback_api_key: ccs-internal-managed
+
+models:
+  primary:
+    name: gpt-6-astra            # GPT-6 Astra via Codex OAuth
+    provider: ccs-astra
+    reasoning_effort: high
+  fallbacks:
+    - name: claude-opus-5        # Claude Opus 5 via Claude OAuth
+      provider: ccs-anthropic
+      reasoning_effort: max
+    - name: kimi-k3              # Kimi K3 via Chutes
+      provider: ccs-kimi
+      reasoning_effort: max
+    - name: deepseek-v4-flash-0731  # DeepSeek V4 Flash 0731 via Chutes
+      provider: ccs-deepseek
+      reasoning_effort: max
+    - name: glm-5.2              # GLM-5.2 via Chutes
+      provider: ccs-glm
+      reasoning_effort: max
+
+# Models that must be served by the one endpoint before a fleet is healthy.
+required_endpoint_models:
+  - gpt-6-astra
+  - claude-opus-5
+  - claude-haiku-4-5-20251001
+  - kimi-k3
+  - deepseek-v4-flash-0731
+  - glm-5.2
+
+# Chutes OpenAI-compatible upstreams served through the one endpoint.
+chutes:
+  upstream_name: chutes
+  base_url: https://llm.chutes.ai/v1
+  models:
+    - {name: moonshotai/Kimi-K3-TEE,               alias: kimi-k3}
+    - {name: moonshotai/Kimi-K2.6-TEE,             alias: kimi-k2.6}
+    - {name: zai-org/GLM-5.2-TEE,                  alias: glm-5.2}
+    - {name: deepseek-ai/DeepSeek-V3.2-TEE,        alias: deepseek-v3.2}
+    - {name: deepseek-ai/DeepSeek-V4-Flash-0731-TEE, alias: deepseek-v4-flash-0731}
+
+# Custom providers written into every default + persona config.
+# base_url / api_key are filled at apply time from .model-endpoint or the
+# control file, so configs stay correct when the endpoint moves.
+providers:
+  ccs-astra:
+    model: gpt-6-astra
+    api_mode: chat_completions
+    extra_body: {reasoning_effort: high}
+    models: [gpt-6-astra]
+  ccs-anthropic:
+    model: claude-opus-5
+    api_mode: anthropic_messages
+    models: [claude-opus-5]
+  ccs-kimi:
+    model: kimi-k3
+    models: [kimi-k3]
+  ccs-deepseek:
+    model: deepseek-v4-flash-0731
+    models: [deepseek-v4-flash-0731]
+  ccs-glm:
+    model: glm-5.2
+    models: [glm-5.2]
+
+# Auxiliary (background) model for the 8 auxiliary tasks, every persona.
+auxiliary:
+  provider: ccs-anthropic
+  model: claude-haiku-4-5-20251001
+  tasks:
+    - title_generation
+    - session_search
+    - flush_memories
+    - approval
+    - mcp
+    - skills_hub
+    - profile_describer
+    - tts_audio_tags
+  prefer_fast_model_tasks:
+    - title_generation
+
+agent:
+  reasoning_effort: high
+  reasoning_overrides: {gpt-6-astra: 0.3}
+
+compression:
+  threshold: 0.25
+
+approvals:
+  mode: 'off'
+
+# Reactions off everywhere they can appear (reactions make a mess of
+# notifications). Env vars win over YAML in Hermes, so both layers are set.
+reactions_off:
+  config:
+    discord:
+      reactions: false
+    telegram:
+      reactions: false
+  display:
+    message_reactions: false
+  platform_extra:
+    - slack
+    - matrix
+    - mattermost
+  env:
+    TELEGRAM_REACTIONS: 'false'
+    DISCORD_REACTIONS: 'false'
+    SLACK_REACTIONS: 'false'
+    MATRIX_REACTIONS: 'false'
+    SIGNAL_REACTIONS: 'false'
+    FEISHU_REACTIONS: 'false'
+
+# Expanded thinking for every persona.
+thinking:
+  show_reasoning: true
+  thinking_mode: full       # expanded (TUI /thinking full)
+  details_mode: expanded    # legacy compat bridge, kept in sync by Hermes anyway
+
+# Scheduled jobs: rely on the persona config. A job that needs a specific
+# model for optimal performance may pin model/provider on the job itself —
+# apply-stack leaves job pins alone and stack-status reports them.
+cron:
+  model: ''
+  model_provider: ''
+
+# Multiplex / fleet capacity ("backends"): when an instance has more than one
+# persona, one multiplexed gateway serves every persona's bots. Concurrency is
+# sized from the persona count so the fleet can operate async and rapidly:
+#   concurrent runs  = clamp(number_of_personas * per_persona, min, cap)
+#   live sessions    = number_of_personas + live_sessions_margin (capped)
+backends:
+  multiplex_profiles: true
+  auto_multiplex_migration: true
+  min_concurrent_runs: 10
+  per_persona: 2
+  cap_concurrent_runs: 32
+  live_sessions_margin: 8
+  live_sessions_cap: 128
+
+# Host-side cliproxy clipboard notes for deploy.sh.
+host:
+  ccs_npm_package: '@kaitranntt/ccs'
+  claude_oauth_service: claude
+  codex_oauth_service: codex
+  systemd_unit_name: ccs-cliproxy.service
+  fleet_api_key_prefix: hermes-fleet

@@ -33,8 +33,14 @@ Usage:
   ./hermes-spawn.sh reauth [instance]     Replace an expired Tailscale login
   ./hermes-spawn.sh credentials [instance] Show URLs, API key, and web login
   ./hermes-spawn.sh update [instance]     Pull images and recreate containers
+  ./hermes-spawn.sh apply-stack [instance]  Apply the fleet model-stack defaults
+  ./hermes-spawn.sh stack-status [instance] Audit the defaults; exit 1 on drift
   ./hermes-spawn.sh info [instance]       Show the collected host snapshot
   ./hermes-spawn.sh preflight             Check host requirements only
+
+Stack defaults live in stack-defaults.yaml. Re-run apply-stack after adding
+personas (profiles) to an instance. Run ./deploy.sh first to bring up the
+host model stack (CCS + CLIProxy + OAuth + Chutes) that endpoints point at.
 
 An instance name is its Tailscale hostname. If omitted, the script selects the
 only instance or prompts when several exist.
@@ -202,6 +208,7 @@ load_instance() {
     HERMES_UID HERMES_GID HERMES_CPUS HERMES_MEMORY
     HERMES_MEMORY_RESERVATION HERMES_SHM_SIZE HERMES_PIDS_LIMIT
     HERMES_IMAGE TAILSCALE_IMAGE
+    MODEL_STACK_BASE_URL MODEL_STACK_API_KEY
   )
   for key in "${keys[@]}"; do
     value="$(read_control_value "$key" "$control")"
@@ -221,11 +228,14 @@ load_instance() {
   validate_memory "$HERMES_SHM_SIZE" || die "Unsafe shared-memory size in $control"
   [[ "$HERMES_PIDS_LIMIT" =~ ^[1-9][0-9]*$ ]] || die "Unsafe PID limit in $control"
   [[ -n "$HERMES_IMAGE" && -n "$TAILSCALE_IMAGE" ]] || die "Missing image setting in $control"
+  [[ -z "$MODEL_STACK_BASE_URL" || "$MODEL_STACK_BASE_URL" =~ ^https?://[A-Za-z0-9.:-]+(/v1)?$ ]] || die "Unsafe MODEL_STACK_BASE_URL in $control"
+  [[ -z "$MODEL_STACK_API_KEY" || ( "$MODEL_STACK_API_KEY" =~ ^[A-Za-z0-9._~+:/=-]{1,220}$ ) ]] || die "Unsafe MODEL_STACK_API_KEY in $control"
   export COMPOSE_PROJECT_NAME TAILSCALE_HOSTNAME TAILSCALE_STATE_DIR
   export TAILSCALE_AUTHKEY_FILE TS_AUTHKEY_SPEC HERMES_DATA_DIR HERMES_PROFILE
   export HERMES_UID HERMES_GID HERMES_CPUS HERMES_MEMORY
   export HERMES_MEMORY_RESERVATION HERMES_SHM_SIZE HERMES_PIDS_LIMIT
   export HERMES_IMAGE TAILSCALE_IMAGE
+  export MODEL_STACK_BASE_URL MODEL_STACK_API_KEY
 }
 
 compose() {
@@ -279,6 +289,8 @@ write_control_file() {
     printf 'HERMES_PIDS_LIMIT=%s\n' "$HERMES_PIDS_LIMIT"
     printf 'HERMES_IMAGE=%s\n' "$HERMES_IMAGE"
     printf 'TAILSCALE_IMAGE=%s\n' "$TAILSCALE_IMAGE"
+    printf 'MODEL_STACK_BASE_URL=%s\n' "${MODEL_STACK_BASE_URL:-}"
+    printf 'MODEL_STACK_API_KEY=%s\n' "${MODEL_STACK_API_KEY:-}"
   } > "$target"
   chmod 600 "$target"
 }
@@ -454,6 +466,12 @@ spawn_instance() {
   compose up -d tailscale
   wait_for_tailscale
   initialize_profile "$api_key"
+  if [[ -f "$STACK_DEFAULTS_FILE" && -f "$STACK_APPLY_LIB" ]] \
+    && confirm 'Apply the fleet model-stack defaults (one endpoint, fallback chain, reactions off, expanded thinking)?' yes; then
+    apply_stack_core no prompt
+  else
+    warn "Fleet model-stack skipped. Apply later with: ./hermes-spawn.sh apply-stack $TAILSCALE_HOSTNAME"
+  fi
   if confirm 'Run the Hermes provider/channel setup wizard now?' yes; then
     run_setup
   else
@@ -481,6 +499,146 @@ setup_command() {
     run_setup
     compose up -d hermes
   fi
+}
+
+# ------------------------------------------------------------- fleet stack
+# One-endpoint model stack (see stack-defaults.yaml). deploy.sh records the
+# endpoint in .model-endpoint (mode 0600); every apply refreshes control.env.
+STACK_DEFAULTS_FILE="$SCRIPT_DIR/stack-defaults.yaml"
+STACK_APPLY_LIB="$SCRIPT_DIR/lib/apply_stack.py"
+STACK_ENDPOINT_FILE="$SCRIPT_DIR/.model-endpoint"
+
+model_stack_resolve() {
+  # Endpoint + key from control.env, then .model-endpoint, then host Tailscale.
+  if [[ -z "${MODEL_STACK_BASE_URL:-}" && -r "$STACK_ENDPOINT_FILE" ]]; then
+    # shellcheck disable=SC1090
+    set +u; . "$STACK_ENDPOINT_FILE"; set -u
+  fi
+  if [[ -z "${MODEL_STACK_BASE_URL:-}" ]]; then
+    local tsip=""
+    tsip="$(tailscale ip -4 2>/dev/null | head -1 || true)"
+    [[ -n "$tsip" ]] && MODEL_STACK_BASE_URL="http://${tsip}:8317/v1"
+  fi
+  MODEL_STACK_API_KEY="${MODEL_STACK_API_KEY:-ccs-internal-managed}"
+  export MODEL_STACK_BASE_URL MODEL_STACK_API_KEY
+}
+
+model_stack_reachable() {
+  [[ -n "${MODEL_STACK_BASE_URL:-}" ]] || return 1
+  curl -fsS --max-time 10 -o /dev/null \
+    -H "Authorization: Bearer ${MODEL_STACK_API_KEY}" \
+    "${MODEL_STACK_BASE_URL%/}/models" 2>/dev/null
+}
+
+model_stack_persist() {
+  local control="$INSTANCE_DIR/control.env" tmp
+  tmp="$(mktemp "${control}.tmp.XXXXXX")"
+  grep -v '^MODEL_STACK_' "$control" > "$tmp" || true
+  printf 'MODEL_STACK_BASE_URL=%s\nMODEL_STACK_API_KEY=%s\n' \
+    "$MODEL_STACK_BASE_URL" "$MODEL_STACK_API_KEY" >> "$tmp"
+  chmod 600 "$tmp"
+  mv -f -- "$tmp" "$control"
+}
+
+model_stack_require() {
+  [[ -n "${MODEL_STACK_BASE_URL:-}" ]] || die "No model endpoint known. Run: ./deploy.sh on this host first."
+  if [[ -t 0 ]]; then
+    curl -fsS --max-time 10 -o /dev/null \
+      -H "Authorization: Bearer ${MODEL_STACK_API_KEY}" \
+      "${MODEL_STACK_BASE_URL%/}/models" || warn "Model endpoint $MODEL_STACK_BASE_URL is not reachable."
+  fi
+}
+
+require_stack_tools() {
+  require_command python3
+  python3 -c 'import yaml' >/dev/null 2>&1 || die "PyYAML is required on this host (e.g. python3-yaml)."
+  [[ -f "$STACK_DEFAULTS_FILE" ]] || die "Missing $STACK_DEFAULTS_FILE"
+  [[ -f "$STACK_APPLY_LIB" ]] || die "Missing $STACK_APPLY_LIB"
+}
+
+stack_python() {
+  MODEL_STACK_ENDPOINT="$MODEL_STACK_BASE_URL" MODEL_STACK_API_KEY="$MODEL_STACK_API_KEY" \
+    python3 "$STACK_APPLY_LIB" "$@"
+}
+
+apply_stack_core() {
+  # Apply to the resolved, loaded instance. $1 = yes (skip prompts) / no.
+  local auto="${1:-no}" restart_choice="${2:-prompt}"
+  require_stack_tools
+  model_stack_resolve
+  [[ -n "${MODEL_STACK_BASE_URL:-}" ]] || die "No model endpoint known. Run ./deploy.sh on this host first."
+  if ! model_stack_reachable; then
+    warn "Model endpoint $MODEL_STACK_BASE_URL is not reachable (CLIProxy down or wrong key)."
+    warn "Run ./deploy.sh on this host first, then retry."
+    if [[ "$auto" == yes ]]; then
+      die "Endpoint unreachable; aborting apply-stack."
+    else
+      confirm 'Apply the stack anyway (Hermes will fail until the endpoint is back)?' no || die "Aborted."
+    fi
+  fi
+  stack_python apply \
+    --home "$HERMES_DATA_DIR" \
+    --launch-profile "$HERMES_PROFILE" \
+    --base-url "$MODEL_STACK_BASE_URL" \
+    --api-key "$MODEL_STACK_API_KEY" \
+    --defaults "$STACK_DEFAULTS_FILE" \
+    --uid "$HERMES_UID" --gid "$HERMES_GID"
+  model_stack_persist
+  stack_status_core --offline >/dev/null 2>&1 || warn "Post-apply audit found drift; run: ./hermes-spawn.sh stack-status $TAILSCALE_HOSTNAME"
+  if compose ps --status running --services 2>/dev/null | grep -Fqx hermes; then
+    local do_restart=no
+    if [[ "$restart_choice" == yes ]]; then do_restart=yes
+    elif [[ "$restart_choice" == no ]]; then do_restart=no
+    elif [[ -t 0 ]]; then
+      confirm 'Hermes is running. Restart it now so the new stack takes effect?' yes && do_restart=yes
+    fi
+    if [[ "$do_restart" == yes ]]; then
+      info "Restarting Hermes to activate the stack..."
+      compose restart hermes
+    else
+      warn "Hermes is still on the old config. Run: ./hermes-spawn.sh restart $TAILSCALE_HOSTNAME"
+    fi
+  fi
+}
+
+stack_status_core() {
+  # Audit only (read-only). $1 = optional --offline.
+  require_stack_tools
+  model_stack_resolve
+  [[ -n "${MODEL_STACK_BASE_URL:-}" ]] || die "No model endpoint known. Run ./deploy.sh on this host first."
+  local reachable=yes
+  if model_stack_reachable; then reachable=yes; else reachable=no; fi
+  stack_python status \
+    --home "$HERMES_DATA_DIR" \
+    --launch-profile "$HERMES_PROFILE" \
+    --base-url "$MODEL_STACK_BASE_URL" \
+    --api-key "$MODEL_STACK_API_KEY" \
+    --defaults "$STACK_DEFAULTS_FILE" ${1:+--quiet}
+  local python_rc=$?
+  if [[ "$reachable" == no ]]; then
+    warn "Model endpoint $MODEL_STACK_BASE_URL unreachable (no live health check)."
+  else
+    info "Model endpoint OK: $MODEL_STACK_BASE_URL"
+  fi
+  return $python_rc
+}
+
+apply_stack_command() {
+  local auto=no restart_choice=prompt
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      -y|--yes) auto=yes ;;
+      --restart) restart_choice=yes ;;
+      --no-restart) restart_choice=no ;;
+      *) die "Unknown apply-stack option: $1" ;;
+    esac
+    shift
+  done
+  apply_stack_core "$auto" "$restart_choice"
+}
+
+stack_status_command() {
+  stack_status_core
 }
 
 credentials_command() {
@@ -523,7 +681,7 @@ main() {
     spawn|create) spawn_instance; return ;;
     list|ls) preflight; list_instances; return ;;
     preflight) preflight; return ;;
-    start|stop|restart|status|logs|setup|config|chat|shell|doctor|serve|reauth|credentials|update|info) ;;
+    start|stop|restart|status|logs|setup|config|chat|shell|doctor|serve|reauth|credentials|update|apply-stack|stack-status|info) ;;
     *) usage >&2; die "Unknown command: $command" ;;
   esac
 
@@ -554,6 +712,8 @@ main() {
     serve) ensure_running; configure_serve ;;
     reauth) reauth_command ;;
     credentials) ensure_running; credentials_command ;;
+    apply-stack) apply_stack_command "${@:3}" ;;
+    stack-status) stack_status_command; exit $? ;;
     update)
       info "Pulling current images and recreating $TAILSCALE_HOSTNAME..."
       compose pull

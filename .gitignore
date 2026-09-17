@@ -1,3 +1,6 @@
 instances/*
 !instances/.gitkeep
 .tailscale-authkey
+# Fleet endpoint record (secret bearer key) written by deploy.sh
+.model-endpoint
+lib/__pycache__/
