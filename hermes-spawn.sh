@@ -576,15 +576,25 @@ apply_stack_core() {
       confirm 'Apply the stack anyway (Hermes will fail until the endpoint is back)?' no || die "Aborted."
     fi
   fi
-  stack_python apply \
+  local apply_out
+  apply_out="$(stack_python apply \
     --home "$HERMES_DATA_DIR" \
     --launch-profile "$HERMES_PROFILE" \
     --base-url "$MODEL_STACK_BASE_URL" \
     --api-key "$MODEL_STACK_API_KEY" \
     --defaults "$STACK_DEFAULTS_FILE" \
-    --uid "$HERMES_UID" --gid "$HERMES_GID"
+    --uid "$HERMES_UID" --gid "$HERMES_GID")"
+  printf '%s\n' "$apply_out"
+  local changes=0
+  if printf '%s\n' "$apply_out" | grep -q '^  wrote '; then changes=1; fi
   model_stack_persist
-  stack_status_core --offline >/dev/null 2>&1 || warn "Post-apply audit found drift; run: ./hermes-spawn.sh stack-status $TAILSCALE_HOSTNAME"
+  if (( changes == 1 )); then
+    stack_status_core --offline >/dev/null 2>&1 || warn "Post-apply audit found drift; run: ./hermes-spawn.sh stack-status $TAILSCALE_HOSTNAME"
+  fi
+  if (( changes == 0 )); then
+    info "No drift on disk — everything already matches stack-defaults.yaml."
+    return 0
+  fi
   if compose ps --status running --services 2>/dev/null | grep -Fqx hermes; then
     local do_restart=no
     if [[ "$restart_choice" == yes ]]; then do_restart=yes
