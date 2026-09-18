@@ -48,6 +48,15 @@ host model stack (CCS + CLIProxy + OAuth + Chutes) that endpoints point at.
 
 An instance name is its Tailscale hostname. If omitted, the script selects the
 only instance or prompts when several exist.
+
+Use 'all' (or -a) in place of the name to run a command on every instance,
+one after another, for example:
+  ./hermes-spawn.sh restart all
+  ./hermes-spawn.sh apply-stack all -y
+  ./hermes-spawn.sh status all
+Each instance keeps its own lock and validation. A failure on one instance
+does not stop the rest; the exit code is 1 if any instance failed.
+Interactive commands (chat, shell, logs, setup, config, reauth) refuse 'all'.
 USAGE
 }
 
@@ -623,9 +632,23 @@ stack_python() {
     python3 "$STACK_APPLY_LIB" "$@"
 }
 
+# An instance may opt out of the fleet stack defaults by setting
+# STACK_MANAGED=no in its control.env (e.g. instances pinned to their own
+# endpoint/model). apply-stack and stack-status then leave it untouched,
+# so 'apply-stack all' can never silently revert a deliberate pin.
+stack_opt_out() {
+  local v
+  v="$(read_control_value STACK_MANAGED "$INSTANCE_DIR/control.env" 2>/dev/null || true)"
+  [[ "$v" == no || "$v" == false || "$v" == 0 ]]
+}
+
 apply_stack_core() {
   # Apply to the resolved, loaded instance. $1 = yes (skip prompts) / no.
   local auto="${1:-no}" restart_choice="${2:-prompt}"
+  if stack_opt_out; then
+    info "$TAILSCALE_HOSTNAME: STACK_MANAGED=no in control.env; skipping stack apply."
+    return 0
+  fi
   require_stack_tools
   model_stack_resolve
   [[ -n "${MODEL_STACK_BASE_URL:-}" ]] || die "No model endpoint known. Run ./deploy.sh on this host first."
@@ -675,6 +698,10 @@ apply_stack_core() {
 
 stack_status_core() {
   # Audit only (read-only). $1 = optional --offline.
+  if stack_opt_out; then
+    info "$TAILSCALE_HOSTNAME: STACK_MANAGED=no in control.env; not audited against fleet defaults."
+    return 0
+  fi
   require_stack_tools
   model_stack_resolve
   [[ -n "${MODEL_STACK_BASE_URL:-}" ]] || die "No model endpoint known. Run ./deploy.sh on this host first."
@@ -777,6 +804,53 @@ reauth_command() {
   configure_serve || true
 }
 
+# ------------------------------------------------------------------ fan-out
+# Run one command across every instance, sequentially. Re-invokes this script
+# per instance so each run keeps its own validation, lock, and env isolation.
+# Interactive commands are refused: they need one dedicated terminal.
+FANOUT_FORBIDDEN=" chat shell logs setup config spawn create reauth "
+
+run_all_command() {
+  local command="$1"; shift
+  local dir name rc=0 failed=() ran=0
+
+  if [[ "$FANOUT_FORBIDDEN" == *" $command "* ]]; then
+    die "Command '$command' is interactive; run it per instance (no 'all')."
+  fi
+
+  # Collect the list FIRST. Running the child inside a `while read` loop lets it
+  # consume the loop's stdin, which silently truncated the fan-out to one instance.
+  local dirs=()
+  while IFS= read -r dir; do
+    [[ -n "$dir" ]] || continue
+    dirs+=("$dir")
+  done < <(instance_dirs)
+
+  for dir in "${dirs[@]}"; do
+    name="$(basename -- "$dir")"
+    ran=$((ran + 1))
+    printf '\n\033[1;34m===> %s: %s\033[0m\n' "$name" "$command"
+    # </dev/null so no child can steal the terminal or block on a prompt.
+    if "$SCRIPT_DIR/hermes-spawn.sh" "$command" "$name" "$@" </dev/null; then
+      :
+    else
+      rc=$?
+      failed+=("$name")
+      warn "$name: $command failed (exit $rc)"
+    fi
+  done
+
+  (( ran > 0 )) || die "No instances exist. Run: ./hermes-spawn.sh spawn"
+
+  printf '\n'
+  if (( ${#failed[@]} > 0 )); then
+    warn "Failed on ${#failed[@]}/$ran: $(printf '%s ' "${failed[@]}")"
+    return 1
+  fi
+  info "Completed '$command' on all $ran instance(s)."
+  return 0
+}
+
 main() {
   local command="${1:-spawn}" requested="${2:-}" dir
   case "$command" in
@@ -787,6 +861,13 @@ main() {
     supervisor) supervisor_command "${@:2}"; return ;;
     start|stop|restart|status|logs|setup|config|chat|shell|doctor|serve|reauth|credentials|update|apply-stack|stack-status|info|webui-ensure|webui-status) ;;
     *) usage >&2; die "Unknown command: $command" ;;
+  esac
+
+  # 'all' (or -a/--all) in the instance slot fans the command out to every
+  # instance instead of naming one. Handled before preflight/lock so each
+  # per-instance run does its own preflight and takes its own lock.
+  case "$requested" in
+    all|-a|--all) preflight; run_all_command "$command" "${@:3}"; return $? ;;
   esac
 
   preflight

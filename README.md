@@ -14,6 +14,29 @@ cd /root/hermes-spawning
 ./hermes-spawn.sh spawn     # create an instance (fleet defaults are applied)
 ```
 
+### Acting on every instance at once
+
+Put `all` (or `-a`) where the instance name goes:
+
+```bash
+./hermes-spawn.sh restart all          # restart the whole fleet
+./hermes-spawn.sh status all
+./hermes-spawn.sh apply-stack all -y
+./hermes-spawn.sh webui-ensure all
+./hermes-spawn.sh credentials all
+```
+
+Instances run one after another, each with its own validation and lock. One
+failure does not stop the rest; the command exits 1 if any instance failed.
+Interactive commands (`chat`, `shell`, `logs`, `setup`, `config`, `reauth`)
+refuse `all` because they need a dedicated terminal.
+
+### Excluding an instance from the fleet defaults
+
+Set `STACK_MANAGED=no` in `instances/<name>/control.env` to pin an instance to
+its own endpoint/model. `apply-stack` and `stack-status` then skip it, so
+`apply-stack all` cannot revert a deliberate pin.
+
 The wizard asks for:
 
 1. A Tailscale hostname (also the local instance name).
