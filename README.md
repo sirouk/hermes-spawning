@@ -228,8 +228,24 @@ Every spawned instance also gets:
 * **hermes-webui chat UI** (pinned to `webui.ref` in `stack-defaults.yaml`,
   github.com/nesquena/hermes-webui) vendored per instance, loopback-bound
   inside the instance netns, pointed at that instance's gateway API, and served
-  tailnet-only at `https://<node>.tail77f45e.ts.net/webui`. Manage it with
-  `./hermes-spawn.sh webui-ensure <inst>` / `webui-status <inst>`.
+  tailnet-only at `https://<node>.tail77f45e.ts.net/webui` **and** at its own
+  origin `https://<node>.tail77f45e.ts.net:8788/` (`webui.serve_port`). Manage
+  it with `./hermes-spawn.sh webui-ensure <inst>` / `webui-status <inst>`.
+
+  **Why two routes.** The Hermex iOS client
+  (github.com/uzairansaruzi/hermex) normalises the server URL you type with
+  `AuthManager.normalizedServerURL`, which does `components.path = ""` — it
+  **throws the path away** and keeps only scheme/host/port. It then calls
+  `/health`, `/api/auth/status` and `/api/auth/login` on that origin. Against a
+  `/webui` sub-path mount those calls land on the Hermes dashboard instead and
+  return `302` / `401 no_cookie`, so the app can never connect. The port-origin
+  route is the shape the app can actually use; `/webui` stays for browsers.
+  Point the app at `https://<node>.tail77f45e.ts.net:8788` and sign in with the
+  webui password (`./hermes-spawn.sh credentials <inst>`).
+
+  Sharing one hostname is safe: the dashboard sets `hermes_session_at`/`_rt`
+  cookies and the webui sets `hermes_session`, so the two logins never clobber
+  each other (cookies ignore ports, so the distinct names matter).
 * **Fleet timeouts** (`stack-defaults.yaml` `timeouts.env`): `HERMES_AGENT_TIMEOUT=14400`
   and `HERMES_AGENT_TIMEOUT_WARNING=3600` land on every persona `.env` via
   `apply-stack`. The former is hermes' gateway inactivity kill — 30 min stock is
@@ -238,8 +254,8 @@ Every spawned instance also gets:
 * **Fleet supervisor**: `systemd/hermes-fleet-supervisor.service` runs
   `scripts/fleet-supervisor.sh` every 30 s. For every running instance it
   restarts the webui daemon if it died (container restarts) and re-adds missing
-  tailscale serve routes (root -> :9119 dashboard, /webui -> :8787, add-only —
-  never resets routes). Install/inspect it with
+  tailscale serve routes (root -> :9119 dashboard, /webui -> :8787, and
+  :8788 -> :8787 for Hermex; add-only — never resets routes). Install/inspect it with
   `./hermes-spawn.sh supervisor install|enable|disable|status`. The spawn flow
   offers to install it (default yes); on systemd-less hosts run
   `scripts/fleet-supervisor.sh` as a keep-alive task instead.

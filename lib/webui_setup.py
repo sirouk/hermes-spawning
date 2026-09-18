@@ -73,6 +73,9 @@ def webui_cfg(defaults):
         "ref": str(w.get("ref") or DEFAULT_REF_FALLBACK),
         "route_path": str(w.get("route_path") or "/webui"),
         "listen_port": int(w.get("listen_port") or 8787),
+        # Origin port for clients that discard the URL path (Hermex iOS).
+        # 0 / empty disables the extra route.
+        "serve_port": int(w.get("serve_port") or 0),
     }
 
 
@@ -256,28 +259,64 @@ def loopback_health(base):
 
 
 def ensure_routes(base, cfg):
-    """Add-only route healing: root -> 9119 dashboard, /webui -> 8787 chat."""
+    """Add-only route healing. Three routes, none ever removed:
+
+      root  :443  /       -> 9119  Hermes dashboard (browser + Hermex Bot Mode)
+            :443  /webui  -> 8787  hermes-webui for desktop browsers
+            :8788 /       -> 8787  hermes-webui at an ORIGIN, which is the only
+                                   shape the Hermex iOS client can use: it
+                                   discards the path of the server URL
+                                   (AuthManager.normalizedServerURL ->
+                                   `components.path = ""`) and then requests
+                                   /health, /api/auth/status, /api/auth/login.
+                                   It does keep the port, hence a port-origin.
+
+    The dashboard and the webui set different session cookie names
+    (hermes_session_at/_rt vs hermes_session), so sharing one hostname across
+    ports does not clobber either login.
+    """
+    serve_port = int(cfg.get("serve_port") or 0)
     r = sh(compose(base, "exec", "-T", "tailscale",
                    "tailscale", "--socket=/tmp/tailscaled.sock", "serve", "status"))
-    routes_root = routes_webui = False
+    routes_root = routes_webui = routes_origin = False
     if r.returncode == 0:
         txt = r.stdout or ""
-        # 'serve status' renders lines like: |-- /webui proxy http://127.0.0.1:8787
+        # 'serve status' groups routes under a URL header line per port:
+        #   https://host.ts.net (tailnet only)
+        #   |-- /      proxy http://127.0.0.1:9119
+        #   https://host.ts.net:8788 (tailnet only)
+        #   |-- / proxy http://127.0.0.1:8787
+        current_port = 443
         for line in txt.splitlines():
-            seg = line.replace("|--", " ").split()
+            stripped = line.strip()
+            if stripped.startswith("https://"):
+                host_part = stripped.split()[0]
+                tail = host_part.rsplit(":", 1)[-1]
+                current_port = int(tail) if tail.isdigit() else 443
+                continue
+            seg = stripped.replace("|--", " ").split()
             if len(seg) < 3:
                 continue
-            path_part, _proxy_word, target = seg[0], seg[1], seg[2]
-            if path_part.rstrip("s") == "/" and "9119" in target:
-                routes_root = True
-            if path_part == cfg["route_path"] and str(cfg["listen_port"]) in target:
-                routes_webui = True
+            path_part, target = seg[0], seg[2]
+            if current_port == 443:
+                if path_part == "/" and "9119" in target:
+                    routes_root = True
+                if path_part == cfg["route_path"] and str(cfg["listen_port"]) in target:
+                    routes_webui = True
+            elif serve_port and current_port == serve_port:
+                if path_part == "/" and str(cfg["listen_port"]) in target:
+                    routes_origin = True
     adds = []
     if not routes_root:
-        adds.append(["tailscale", "--socket=/tmp/tailscaled.sock", "serve", "--bg", "--set-path", "/", "http://127.0.0.1:9119"])
+        adds.append(["tailscale", "--socket=/tmp/tailscaled.sock", "serve", "--bg",
+                     "--set-path", "/", "http://127.0.0.1:9119"])
     if not routes_webui:
         adds.append(["tailscale", "--socket=/tmp/tailscaled.sock", "serve", "--bg", "--set-path",
                      cfg["route_path"], f"http://127.0.0.1:{cfg['listen_port']}"])
+    if serve_port and not routes_origin:
+        # No --set-path: this publishes the webui at the root of its own port.
+        adds.append(["tailscale", "--socket=/tmp/tailscaled.sock", "serve", "--bg",
+                     f"--https={serve_port}", f"http://127.0.0.1:{cfg['listen_port']}"])
     for cmd in adds:
         rr = sh(compose(base, "exec", "-T", "tailscale", *cmd))
         if rr.returncode != 0:

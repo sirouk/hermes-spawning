@@ -196,6 +196,15 @@ webui:
   ref: 2cf8e8a5eae5a42deaa888d027c408defbe76eae
   route_path: /webui
   listen_port: 8787
+  # Hermex (the iOS client, github.com/uzairansaruzi/hermex) strips the path from
+  # the server URL it is given (AuthManager.normalizedServerURL sets
+  # `components.path = ""`), then calls /health, /api/auth/status and
+  # /api/auth/login on the ORIGIN. A sub-path mount such as /webui therefore can
+  # never work with it: those calls land on the dashboard instead and return
+  # 302 / 401 no_cookie. So the webui also gets its own HTTPS port-origin, which
+  # the app does keep. Both routes stay live: /webui for desktop browsers,
+  # :8788 for Hermex and any other root-origin client.
+  serve_port: 8788
 
 # Runtime tiers: "heavy" instances get generous compose resource caps via control.env
 # (HERMES_CPUS / HERMES_MEMORY / HERMES_MEMORY_RESERVATION / HERMES_SHM_SIZE /

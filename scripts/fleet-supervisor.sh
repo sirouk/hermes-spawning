@@ -5,6 +5,12 @@ set -u
 REPO="${HERMES_SPAWNING_REPO:-$(cd "$(dirname "$0")/.." && pwd)}"
 INTERVAL="${FLEET_SUPERVISOR_INTERVAL:-30}"
 LOG="${FLEET_SUPERVISOR_LOG:-$REPO/instances/.supervisor.log}"
+# Webui origin port for the Hermex iOS client. Single source of truth is
+# stack-defaults.yaml (webui.serve_port); parsed with sed so this stays
+# dependency-free, with the shipped default as the fallback.
+WEBUI_SERVE_PORT="$(sed -n 's/^[[:space:]]*serve_port:[[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+  "$REPO/stack-defaults.yaml" 2>/dev/null | head -1)"
+[ -n "$WEBUI_SERVE_PORT" ] || WEBUI_SERVE_PORT=8788
 ts() { date -u +%Y-%m-%dT%H:%M:%SZ; }
 logln() { printf '%s %s\n' "$(ts)" "$*" >> "$LOG"; }
 
@@ -34,16 +40,28 @@ ensure_instance() {
     esac
   fi
   # serve routes present? (add-only)
-  routes="$(docker compose --env-file "$control" -f "$REPO/compose.yaml" -p "hermes-$name"     exec -T tailscale tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null || true)"
-  case "$routes" in *'"url":"http://127.0.0.1:9119"'*|*9119*) : ;;
+  routes="$(docker compose --env-file "$control" -f "$REPO/compose.yaml" -p "hermes-$name" \
+    exec -T tailscale tailscale --socket=/tmp/tailscaled.sock serve status 2>/dev/null || true)"
+  case "$routes" in *9119*) : ;;
     *) logln "$name: root route missing — adding"
        docker compose --env-file "$control" -f "$REPO/compose.yaml" -p "hermes-$name" exec -T tailscale \
-         tailscale --socket=/tmp/tailscaled.sock serve --bg --set-path / http://127.0.0.1:9119 >/dev/null 2>&1          && logln "$name: root route re-added" || logln "$name: root route add FAILED" ;;
+         tailscale --socket=/tmp/tailscaled.sock serve --bg --set-path / http://127.0.0.1:9119 >/dev/null 2>&1 \
+         && logln "$name: root route re-added" || logln "$name: root route add FAILED" ;;
   esac
   case "$routes" in *"/webui"*8787*) : ;;
     *) logln "$name: /webui route missing — adding"
        docker compose --env-file "$control" -f "$REPO/compose.yaml" -p "hermes-$name" exec -T tailscale \
-         tailscale --socket=/tmp/tailscaled.sock serve --bg --set-path /webui http://127.0.0.1:8787 >/dev/null 2>&1          && logln "$name: /webui route re-added" || logln "$name: /webui route add FAILED" ;;
+         tailscale --socket=/tmp/tailscaled.sock serve --bg --set-path /webui http://127.0.0.1:8787 >/dev/null 2>&1 \
+         && logln "$name: /webui route re-added" || logln "$name: /webui route add FAILED" ;;
+  esac
+  # Hermex (iOS) origin route: the app drops the URL path, so the webui must also
+  # answer at the root of its own HTTPS port. Match the ":8788" header line that
+  # 'serve status' prints for that port, not a bare "8788" anywhere in the text.
+  case "$routes" in *":$WEBUI_SERVE_PORT"*) : ;;
+    *) logln "$name: webui origin route (:$WEBUI_SERVE_PORT) missing — adding"
+       docker compose --env-file "$control" -f "$REPO/compose.yaml" -p "hermes-$name" exec -T tailscale \
+         tailscale --socket=/tmp/tailscaled.sock serve --bg --https="$WEBUI_SERVE_PORT" http://127.0.0.1:8787 >/dev/null 2>&1 \
+         && logln "$name: webui origin route re-added" || logln "$name: webui origin route add FAILED" ;;
   esac
 }
 
