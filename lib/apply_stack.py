@@ -171,12 +171,25 @@ def build_persona_patch(defaults, base_url, api_key):
         providers.append((name, entry))
 
     aux_spec = d.get("auxiliary") or {}
+    aux_chain = []
+    for entry in (aux_spec.get("fallback_chain") or []):
+        if isinstance(entry, dict) and entry.get("provider") and entry.get("model"):
+            aux_chain.append({
+                "provider": f"custom:{entry['provider']}",
+                "model": entry["model"],
+            })
     aux = {}
     for task in (aux_spec.get("tasks") or []):
         block = {
             "provider": f"custom:{aux_spec['provider']}",
             "model": aux_spec["model"],
         }
+        # Explicit empty effort = omit on the wire (no inherited extra effort
+        # on background lanes; see stack-defaults.yaml auxiliary note).
+        if "reasoning_effort" in aux_spec:
+            block["reasoning_effort"] = aux_spec["reasoning_effort"]
+        if aux_chain:
+            block["fallback_chain"] = list(aux_chain)
         if task in (aux_spec.get("prefer_fast_model_tasks") or []):
             block["prefer_fast_model"] = True
         aux[task] = block

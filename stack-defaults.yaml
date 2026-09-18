@@ -81,10 +81,23 @@ providers:
     model: glm-5.2
     models: [glm-5.2]
 
-# Auxiliary (background) model for the 8 auxiliary tasks, every persona.
+# Auxiliary (background) model for the auxiliary tasks, every persona.
+# Two hard-won reliability guards are part of the canonical policy:
+#   reasoning_effort: '' — background lanes explicitly carry NO reasoning
+#     effort field (server default). An inherited high effort on a background
+#     lane turns small calls into minutes inside the agent's 600 s wrapper
+#     and liaisons with the 60 s failed-provider skip list. Explicitly empty
+#     is the loud, audited version of "do not inhale the persona's effort".
+#   fallback_chain — the aux lane keeps its own ladder on a DIFFERENT quota
+#     bucket than the Claude OAuth lane, so a 429 storm on the OAuth account
+#    degrades background tasks instead of bricking title/summaries for hours.
 auxiliary:
   provider: ccs-anthropic
   model: claude-haiku-4-5-20251001
+  reasoning_effort: ''
+  fallback_chain:
+    - {provider: ccs-kimi, model: kimi-k3}
+    - {provider: ccs-deepseek, model: deepseek-v4-flash-0731}
   tasks:
     - title_generation
     - session_search
@@ -94,6 +107,7 @@ auxiliary:
     - skills_hub
     - profile_describer
     - tts_audio_tags
+    - compression
   prefer_fast_model_tasks:
     - title_generation
 

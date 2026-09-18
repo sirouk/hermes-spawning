@@ -119,7 +119,13 @@ personas to an instance.
   `custom:ccs-kimi` → `deepseek-v4-flash-0731` (max) via `custom:ccs-deepseek`
   → `glm-5.2` (max) via `custom:ccs-glm`.
 - **Auxiliaries**: `claude-haiku-4-5-20251001` via `custom:ccs-anthropic` on
-  all 8 auxiliary tasks, every persona.
+  all 9 auxiliary tasks (incl. compression), every persona, with two
+  reliability guards baked in: each task carries an explicitly empty
+  `reasoning_effort: ''` (omitted on the wire - background lanes never
+  inhale the persona's effort, which would otherwise stall small calls
+  inside the 600s wrapper) and its own native `fallback_chain`
+  (kimi-k3 → deepseek-v4-flash-0731), so an OAuth-account 429 storm
+  degrades aux work instead of bricking it.
 - **Scheduled jobs**: `cron.model`/`cron.model_provider` are left null, so
   jobs inherit the persona config. A job that needs a specific model for
   optimal performance may pin `model`/`provider` on the job itself; such pins
