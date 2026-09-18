@@ -4,3 +4,4 @@ instances/*
 # Fleet endpoint record (secret bearer key) written by deploy.sh
 .model-endpoint
 lib/__pycache__/
+.cache/

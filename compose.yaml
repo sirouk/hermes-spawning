@@ -99,7 +99,7 @@ services:
       nproc:
         soft: 8192
         hard: 8192
-    stop_grace_period: 45s
+    stop_grace_period: ${HERMES_STOP_GRACE_PERIOD:-45s}
     # Name the executable explicitly. Current s6-overlay-based images can
     # otherwise treat a leading global option (such as -p) as the program.
     command: ["hermes", "-p", "${HERMES_PROFILE:?Set HERMES_PROFILE}", "gateway", "run"]

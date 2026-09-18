@@ -35,6 +35,10 @@ Usage:
   ./hermes-spawn.sh update [instance]     Pull images and recreate containers
   ./hermes-spawn.sh apply-stack [instance]  Apply the fleet model-stack defaults
   ./hermes-spawn.sh stack-status [instance] Audit the defaults; exit 1 on drift
+  ./hermes-spawn.sh webui-ensure [instance]  Deploy+launch the instance webui chat UI
+  ./hermes-spawn.sh webui-status [instance]  Show webui status
+  ./hermes-spawn.sh supervisor install|enable|disable|status
+                                     Fleet webui/routes autostart (systemd)
   ./hermes-spawn.sh info [instance]       Show the collected host snapshot
   ./hermes-spawn.sh preflight             Check host requirements only
 
@@ -480,6 +484,18 @@ spawn_instance() {
   compose up -d hermes
   configure_serve || true
 
+  # Every spawn gets webui + serve routes by default, and host-side autostart.
+  webui_ensure_instance apply || warn "webui setup failed — rerun: ./hermes-spawn.sh webui-ensure $TAILSCALE_HOSTNAME"
+  if command -v systemctl >/dev/null 2>&1 && (( $(id -u) == 0 )); then
+    if ! systemctl is-enabled "$FLEET_SUPERVISOR_UNIT_NAME" >/dev/null 2>&1; then
+      if confirm 'Enable the fleet supervisor (webui + serve routes auto-restart)?' yes; then
+        supervisor_command install || warn "supervisor install failed — rerun: ./hermes-spawn.sh supervisor install"
+      fi
+    fi
+  elif ! command -v systemctl >/dev/null 2>&1; then
+    info "No systemd — start scripts/fleet-supervisor.sh manually (keep-alive task)."
+  fi
+
   printf '\nInstance %s is running.\n' "$TAILSCALE_HOSTNAME"
   credentials_command
   printf '\nManage it with: ./hermes-spawn.sh status %s\n' "$TAILSCALE_HOSTNAME"
@@ -488,6 +504,13 @@ spawn_instance() {
 ensure_running() {
   compose up -d
   wait_for_tailscale
+  # Heal webui + routes for already-vendored instances (cheap; new deployments
+  # happen via webui-ensure apply / spawn).
+  if [[ -f "$HERMES_DATA_DIR/hermes-webui/ctl.sh" ]]; then
+    webui_ensure_instance launch || true
+  elif webui_enabled [[ -n "$WEBUI_SETUP_LIB" ]]; then
+    info "webui not deployed for $TAILSCALE_HOSTNAME — run: ./hermes-spawn.sh webui-ensure $TAILSCALE_HOSTNAME"
+  fi
 }
 
 setup_command() {
@@ -505,7 +528,46 @@ setup_command() {
 # One-endpoint model stack (see stack-defaults.yaml). deploy.sh records the
 # endpoint in .model-endpoint (mode 0600); every apply refreshes control.env.
 STACK_DEFAULTS_FILE="$SCRIPT_DIR/stack-defaults.yaml"
+stack_status_command() {
+  stack_status_core
+}
+
+webui_enabled() {
+  [[ -f "$STACK_DEFAULTS_FILE" ]] && grep -qE '^  enabled:.*(true|yes|1)' "$STACK_DEFAULTS_FILE" 2>/dev/null
+}
+
+# Idempotent webui deploy+launch+routes via lib/webui_setup.py.
+#  $1 = "apply" (clone+deploy+env+launch+routes) or "launch" (start+routes only)
+webui_ensure_instance() {
+  [[ -f "$WEBUI_SETUP_LIB" ]] || { warn "webui support files missing ($WEBUI_SETUP_LIB)"; return 1; }
+  webui_enabled || { info "webui disabled in stack-defaults.yaml — skipping."; return 0; }
+  python3 "$WEBUI_SETUP_LIB" "${1:-apply}" \
+    --home "$HERMES_DATA_DIR" \
+    --instance "$TAILSCALE_HOSTNAME" \
+    --control "$INSTANCE_DIR/control.env" \
+    --defaults "$STACK_DEFAULTS_FILE" \
+    --launch-profile "$HERMES_PROFILE" \
+    --uid "$HERMES_UID" --gid "$HERMES_GID"
+}
+
+webui_ensure_command() { webui_ensure_instance apply; }
+webui_status_command() {
+  if [[ ! -d "$HERMES_DATA_DIR/hermes-webui" ]]; then
+    echo "webui not deployed for $TAILSCALE_HOSTNAME (run: ./hermes-spawn.sh webui-ensure $TAILSCALE_HOSTNAME)"
+    return 0
+  fi
+  python3 "$WEBUI_SETUP_LIB" status \
+    --home "$HERMES_DATA_DIR" \
+    --instance "$TAILSCALE_HOSTNAME" \
+    --control "$INSTANCE_DIR/control.env" \
+    --defaults "$STACK_DEFAULTS_FILE"
+}
+
+WEBUI_SETUP_LIB="$SCRIPT_DIR/lib/webui_setup.py"
 STACK_APPLY_LIB="$SCRIPT_DIR/lib/apply_stack.py"
+FLEET_SUPERVISOR_SCRIPT="$SCRIPT_DIR/scripts/fleet-supervisor.sh"
+FLEET_SUPERVISOR_UNIT_SRC="$SCRIPT_DIR/systemd/hermes-fleet-supervisor.service"
+FLEET_SUPERVISOR_UNIT_NAME="hermes-fleet-supervisor.service"
 STACK_ENDPOINT_FILE="$SCRIPT_DIR/.model-endpoint"
 
 model_stack_resolve() {
@@ -672,6 +734,37 @@ credentials_command() {
   printf 'Profile:   %s\n' "$HERMES_PROFILE"
 }
 
+# ---------------------------------------------------------------- supervisor
+# Host-side fleet supervisor: one systemd unit keeps webui + serve routes alive
+# across container restarts for every running instance. Operator-approved default.
+supervisor_command() {
+  local sub="${1:-status}"
+  if ! command -v systemctl >/dev/null 2>&1; then
+    warn "No systemd on this host. Install manually:"
+    printf '  macOS launchd equivalent: run scripts/fleet-supervisor.sh as a keep-alive agent.\n'
+    return 1
+  fi
+  case "$sub" in
+    install)
+      require_command sed
+      local unit_dest="/etc/systemd/system/$FLEET_SUPERVISOR_UNIT_NAME"
+      [[ -f "$FLEET_SUPERVISOR_UNIT_SRC" ]] || die "missing $FLEET_SUPERVISOR_UNIT_SRC"
+      if (( $(id -u) != 0 )); then die "supervisor install needs root (unit write + systemctl)."; fi
+      sed "s|/root/hermes-spawning|$SCRIPT_DIR|g" "$FLEET_SUPERVISOR_UNIT_SRC" > "$unit_dest"
+      systemctl daemon-reload
+      systemctl enable --now "$FLEET_SUPERVISOR_UNIT_NAME"
+      systemctl --no-pager --lines=5 status "$FLEET_SUPERVISOR_UNIT_NAME" || true
+      ;;
+    enable)  systemctl enable --now "$FLEET_SUPERVISOR_UNIT_NAME" ;;
+    disable) systemctl disable --now "$FLEET_SUPERVISOR_UNIT_NAME" ;;
+    status)
+      systemctl --no-pager --lines=10 status "$FLEET_SUPERVISOR_UNIT_NAME" || true
+      [[ -f "$INSTANCES_DIR/.supervisor.log" ]] && tail -n 15 "$INSTANCES_DIR/.supervisor.log" || true
+      ;;
+    *) die "supervisor subcommands: install enable disable status" ;;
+  esac
+}
+
 reauth_command() {
   local authkey
   printf 'Create a fresh one-off or reusable auth key at:\n'
@@ -691,7 +784,8 @@ main() {
     spawn|create) spawn_instance; return ;;
     list|ls) preflight; list_instances; return ;;
     preflight) preflight; return ;;
-    start|stop|restart|status|logs|setup|config|chat|shell|doctor|serve|reauth|credentials|update|apply-stack|stack-status|info) ;;
+    supervisor) supervisor_command "${@:2}"; return ;;
+    start|stop|restart|status|logs|setup|config|chat|shell|doctor|serve|reauth|credentials|update|apply-stack|stack-status|info|webui-ensure|webui-status) ;;
     *) usage >&2; die "Unknown command: $command" ;;
   esac
 
@@ -727,6 +821,8 @@ main() {
     reauth) reauth_command ;;
     credentials) ensure_running; credentials_command ;;
     apply-stack) apply_stack_command "${@:3}" ;;
+    webui-ensure) webui_ensure_command ;;
+    webui-status) webui_status_command ;;
     stack-status) stack_status_command; exit $? ;;
     update)
       info "Pulling current images and recreating $TAILSCALE_HOSTNAME..."

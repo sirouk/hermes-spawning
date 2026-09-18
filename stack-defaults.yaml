@@ -170,6 +170,37 @@ backends:
   live_sessions_margin: 8
   live_sessions_cap: 128
 
+# ------------------------------------------------------------- timeouts (env)
+# Operator directive (2026-09-18): never let the gateway cut a response short on a
+# busy turn or compaction. HERMES_AGENT_TIMEOUT is the gateway inactivity kill for a
+# RUNNING agent; stock default is 1800s (30m) — bumped 8x here. 0 = unlimited (kept off
+# by default so a wedged agent still has a backstop; use 0 only for dedicated
+# long-research instances seen from tools that quote hermes tips).
+timeouts:
+  env:
+    # 4h gateway inactivity kill (was 30m default)
+    HERMES_AGENT_TIMEOUT: "14400"
+    # pre-kill warning at 1h (was 15m default)
+    HERMES_AGENT_TIMEOUT_WARNING: "3600"
+
+# ------------------------------------------------------------- webui (per spawn)
+# Every spawn gets one hermes-webui chat UI by default: vendored at apply time from the
+# pinned ref below, loopback-bound inside the instance netns on <listen_port>, gateway
+# backend pointed at the per-instance API (127.0.0.1:8642 with that instance's
+# API_SERVER_KEY), served tailnet-only on <route_path> of the node hostname. The spawn
+# flow installs + launches it; scripts/fleet-supervisor.sh keeps it and the serve
+# routes alive across container restarts. creds: ./hermes-spawn.sh credentials <inst>.
+webui:
+  enabled: true
+  source: https://github.com/nesquena/hermes-webui.git
+  ref: 2cf8e8a5eae5a42deaa888d027c408defbe76eae
+  route_path: /webui
+  listen_port: 8787
+
+# Runtime tiers: "heavy" instances get generous compose resource caps via control.env
+# (HERMES_CPUS / HERMES_MEMORY / HERMES_MEMORY_RESERVATION / HERMES_SHM_SIZE /
+#  HERMES_PIDS_LIMIT / HERMES_STOP_GRACE_PERIOD). See README "Heavy spawns".
+
 # Host-side cliproxy clipboard notes for deploy.sh.
 host:
   ccs_npm_package: '@kaitranntt/ccs'

@@ -219,3 +219,56 @@ pair in its own VM as an additional boundary.
 - `instances/HOSTNAME/system-info.txt` — host capacity/security snapshot.
 - `instances/HOSTNAME/hermes-data/` — all mutable Hermes state.
 - `instances/HOSTNAME/tailscale-state/` — persistent Tailscale node state.
+
+
+## Web UI, timeouts, and fleet supervisor (ships by default)
+
+Every spawned instance also gets:
+
+* **hermes-webui chat UI** (pinned to `webui.ref` in `stack-defaults.yaml`,
+  github.com/nesquena/hermes-webui) vendored per instance, loopback-bound
+  inside the instance netns, pointed at that instance's gateway API, and served
+  tailnet-only at `https://<node>.tail77f45e.ts.net/webui`. Manage it with
+  `./hermes-spawn.sh webui-ensure <inst>` / `webui-status <inst>`.
+* **Fleet timeouts** (`stack-defaults.yaml` `timeouts.env`): `HERMES_AGENT_TIMEOUT=14400`
+  and `HERMES_AGENT_TIMEOUT_WARNING=3600` land on every persona `.env` via
+  `apply-stack`. The former is hermes' gateway inactivity kill — 30 min stock is
+  too aggressive for long research/compaction turns; we ship 4 h (+ 1 h pre-kill
+  warning). `0` disables the guard entirely; we deliberately keep a backstop.
+* **Fleet supervisor**: `systemd/hermes-fleet-supervisor.service` runs
+  `scripts/fleet-supervisor.sh` every 30 s. For every running instance it
+  restarts the webui daemon if it died (container restarts) and re-adds missing
+  tailscale serve routes (root -> :9119 dashboard, /webui -> :8787, add-only —
+  never resets routes). Install/inspect it with
+  `./hermes-spawn.sh supervisor install|enable|disable|status`. The spawn flow
+  offers to install it (default yes); on systemd-less hosts run
+  `scripts/fleet-supervisor.sh` as a keep-alive task instead.
+
+### Heavy spawns (tao-fleet class)
+
+Heavy instances ride the same lanes; give them headroom via control.env knobs and
+the compose template env knobs (`pids_limit`, `mem_limit`, `mem_reservation`,
+`cpus`, `shm_size`, `HERMES_STOP_GRACE_PERIOD` via `HERMES_STOP_GRACE_PERIOD`,
+default `45 s`). Recommended heavy tier on a 32 vCPU / 62 GiB host:
+`HERMES_CPUS=12`, `HERMES_MEMORY=24g`, `HERMES_MEMORY_RESERVATION=4g`,
+`HERMES_SHM_SIZE=4g`, `HERMES_PIDS_LIMIT=8192`, `HERMES_STOP_GRACE_PERIOD=90s`,
+plus the generalized fleet timeouts above. Long research/compaction
+turns live entirely in the fleet timeouts (`HERMES_AGENT_TIMEOUT=14400`,
+`HERMES_AGENT_TIMEOUT_WARNING=3600`).
+
+### Single-gateway topology (tao-fleet class, 2026-09-18)
+
+The fleet runs **one gateway per instance**: the s6 `gateway-default` slot
+owns the responsive routes (API server on 8642, dashboard, session multiplex);
+extra per-profile gateway slots stay registered but DOWN (desired_state
+stopped). This is hermes' own boot contract (`container_boot.py` reconcile):
+slots always re-register, but only `desired_state: running` autostarts, and the
+merge persists across container restarts. `hermes gateway stop|-p <p> gateway
+stop` sets the durable desired_state; stop hangs are settled by the container
+owner (SIGKILL by the container's hermes uid — container root is cap-dropped).
+Rules:
+
+- default home gateway = the multiplexing root gateway (owns :8642 API platform)
+- per-profile gateway slots stay registered but DOWN (desired_state stopped)
+- boot reconcile re-registers slots but only desired_state `running` starts
+- the webui gateway backend key is always the default home API_SERVER_KEY

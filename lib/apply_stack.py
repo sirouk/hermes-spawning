@@ -292,11 +292,14 @@ def merged_fallbacks(cfg_fallbacks, canonical, ccs_names):
 
 # --------------------------------------------------------------- env upserts
 def env_upserts(defaults):
-    return {
+    items = {
         "TELEGRAM_REACTIONS": "false", "DISCORD_REACTIONS": "false",
         "SLACK_REACTIONS": "false", "MATRIX_REACTIONS": "false",
         "SIGNAL_REACTIONS": "false", "FEISHU_REACTIONS": "false",
     }
+    for k, v in ((defaults.get("timeouts") or {}).get("env") or {}).items():
+        items[str(k)] = str(v)
+    return items
 
 def upsert_env_file(path, items, uid=None, gid=None):
     lines = []
