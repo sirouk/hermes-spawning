@@ -130,14 +130,31 @@ def ensure_dict(cfg, key):
     return cfg[key]
 
 # ------------------------------------------------------------------ personas
+PERSONA_NAME = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
+
 def personas(home):
-    """['default'] + sorted persona dir names."""
+    """['default'] + sorted, hermes-valid persona dir names.
+
+    Only names hermes itself accepts ([a-z0-9][a-z0-9_-]*); wizard backups and
+    other dot/junk dirs are skipped — separately reported via junk_personas()
+    so stack audits can surface them instead of feeding them to hermes.
+    """
     ps = []
     base = os.path.join(home, "profiles")
     for d in sorted(os.listdir(base)) if os.path.isdir(base) else []:
-        if os.path.isdir(os.path.join(base, d)):
+        full = os.path.join(base, d)
+        if os.path.isdir(full) and PERSONA_NAME.match(d):
             ps.append(d)
     return ["default"] + ps
+
+def junk_personas(home):
+    """Profile dirs hermes would reject (dot-dirs, wizard backups, etc.)."""
+    base = os.path.join(home, "profiles")
+    out = []
+    for d in sorted(os.listdir(base)) if os.path.isdir(base) else []:
+        if os.path.isdir(os.path.join(base, d)) and not PERSONA_NAME.match(d):
+            out.append(d)
+    return out
 
 def config_path(home, persona):
     return os.path.join(home, "config.yaml") if persona == "default" \
@@ -483,6 +500,8 @@ def main():
         base_url = f"{base_url}{(defaults.get('endpoint') or {}).get('path', '/v1')}"
 
     rep = Reporter(quiet=args.quiet)
+    for junk in junk_personas(home):
+        rep.note("profiles", f"ignoring non-profile directory {junk!r} (invalid hermes profile name; hermes will choke on it — remove: rm -rf {os.path.join(home,'profiles',junk)!r})")
     repo = f"launch={args.launch_profile}"
     n, runs, live, mp = process(home, defaults, base_url, args.api_key,
                                 args.launch_profile, args.mode, rep,

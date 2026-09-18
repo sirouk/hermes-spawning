@@ -701,9 +701,13 @@ main() {
   export INSTANCE_DIR
   load_instance "$dir"
 
-  # Prevent two lifecycle operations from racing on one instance.
+  # Prevent two lifecycle operations from racing on one instance. Time out
+  # loudly with the holder named, instead of waiting forever.
   exec 9>"$INSTANCE_DIR/.operation.lock"
-  flock 9 2>/dev/null || die "Another operation is already running for $TAILSCALE_HOSTNAME."
+  if ! flock -w 20 9 2>/dev/null; then
+    holders="$(fuser "$INSTANCE_DIR/.operation.lock" 2>/dev/null | xargs || true)"
+    die "Instance $TAILSCALE_HOSTNAME is busy (lock held by PID(s): ${holders:-unknown}). Close that operation and retry."
+  fi
 
   case "$command" in
     start) ensure_running; configure_serve || true ;;
