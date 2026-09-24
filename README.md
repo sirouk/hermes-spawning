@@ -122,7 +122,16 @@ Currently shipped:
   `name:` room with `roomId: null` can be healthy; rewriting it into an
   `id:` engine room is **not** a visibility repair. Inspect and back up the
   actual target before any registry surgery; use client-visible readback
-  rather than trusting a backend write or a script dry run.
+  rather than trusting a backend write or a script dry run. **Room-seat rule:**
+  obtain the exact connection id from the affected Desktop, never from a
+  hostname or gateway label; check each room with the read-only
+  `lib/fleet_doctor.py --instance-dir instances/<fleet>
+  --verified-connection-id <desktop-id>
+  --require-room-connection 'id:<room-id>=<desktop-id>'` option.
+  A saved-seat PASS is not proof of Desktop visibility or a member reply.
+  If wrong seats fill the six-seat picker, follow the backed-up, narrow
+  ghost-seat recovery in the skill before reseating through Desktop; never
+  wipe a container to repair a client-synced room.
 
 The wizard asks for:
 

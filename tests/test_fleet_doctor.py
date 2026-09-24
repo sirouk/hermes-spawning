@@ -267,6 +267,78 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(rc, 0)
         self.assertEqual(rows, [])
 
+    def seat_required_room(self, *connection_ids: str) -> None:
+        self.seat_room(*connection_ids)
+        home = self.instance / "hermes-data"
+        (home / "profile.yaml").write_text(
+            (home / "profiles" / "alice" / "profile.yaml").read_text())
+
+    def test_required_room_seats_need_exact_operator_supplied_identity(self):
+        key = "id:room-1"
+        required = [f"{key}=gw-real"]
+        self.seat_required_room("gw-real", "gw-real")
+        data, rc = self.run_doc(require_room_connection=required,
+                                verified_connection_ids=["gw-real"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(data["required_room_connections"], {key: "gw-real"})
+        self.assertEqual(findings(data, "required_room_seats")[0]["status"], "PASS")
+        self.assertIn("human check", findings(data, "required_room_seats")[0]["detail"])
+        self.seat_required_room("gw-guessed", "gw-guessed")
+        data, rc = self.run_doc(require_room_connection=required,
+                                verified_connection_ids=["gw-real"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(findings(data, "required_room_seats")[0]["status"], "FAIL")
+        self.seat_required_room("gw-real", "gw-guessed")
+        data, rc = self.run_doc(require_room_connection=required,
+                                verified_connection_ids=["gw-real"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(findings(data, "required_room_seats")[0]["status"], "FAIL")
+
+    def test_required_room_missing_empty_local_or_duplicate_seats_fail(self):
+        required = ["id:room-1=gw-real"]
+        for ids in ((), ("gw-real",), ("local", "local")):
+            self.seat_required_room(*ids)
+            data, rc = self.run_doc(require_room_connection=required,
+                                    verified_connection_ids=["gw-real"])
+            self.assertEqual(rc, 1, ids)
+            self.assertEqual(findings(data, "required_room_seats")[0]["status"], "FAIL")
+        self.seat_required_room("gw-real", "gw-real")
+        profile = self.instance / "hermes-data" / "profile.yaml"
+        registry = yaml.safe_load(profile.read_text())
+        room = registry["ui_meta"]["hermes-bots-groups"]["rooms"]["id:room-1"]
+        room["members"][1]["name"] = room["members"][0]["name"]
+        profile.write_text(yaml.safe_dump(registry))
+        data, rc = self.run_doc(require_room_connection=required,
+                                verified_connection_ids=["gw-real"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(findings(data, "required_room_seats")[0]["status"], "FAIL")
+        data, rc = self.run_doc(require_room_connection=["id:missing=gw-real"],
+                                verified_connection_ids=["gw-real"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(findings(data, "required_room_seats")[0]["status"], "FAIL")
+        profile.write_text(yaml.safe_dump({"ui_meta": {"hermes-bots-groups": {
+            "rooms": {"id:room-1": {"members": [
+                {"name": f"bot{i}", "connectionId": "gw-real",
+                 "connectionKind": "remote"} for i in range(7)]}}}}}))
+        data, rc = self.run_doc(require_room_connection=required,
+                                verified_connection_ids=["gw-real"])
+        self.assertEqual(rc, 1)
+        self.assertEqual(findings(data, "required_room_seats")[0]["status"], "FAIL")
+
+    def test_required_room_mapping_is_explicit_and_single_instance(self):
+        self.seat_required_room("gw-real", "gw-real")
+        for args in (["bad"], ["id:room-1=local"],
+                     ["id:room-1=gw-real", "id:room-1=gw-wrong"]):
+            data, rc = self.run_doc(require_room_connection=args,
+                                    verified_connection_ids=["gw-real"])
+            self.assertEqual(rc, 2, args)
+        data, rc = self.run_doc(require_room_connection=["id:room-1=gw-real"])
+        self.assertEqual(rc, 2)  # an unverified assertion cannot be a guard
+        data, rc = doctor.run(instances_dir=self.root,
+                              require_room_connection=["id:room-1=gw-real"],
+                              verified_connection_ids=["gw-real"], now=NOW)
+        self.assertEqual(rc, 2)
+
     def test_verified_ids_are_reported_and_never_make_a_fleet_ready(self):
         self.seat_room("gw-real")
         data, rc = self.run_doc(verified_connection_ids=["gw-real"])

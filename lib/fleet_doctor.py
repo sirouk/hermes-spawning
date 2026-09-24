@@ -291,9 +291,47 @@ def check_instance(instance_dir: Path, handoff_policy: dict[str, list[str]],
     return checks
 
 
+def _required_room_seats(checks: list[dict], instance_dir: Path,
+                         required: dict[str, str]) -> None:
+    """Fail closed on an operator-named Desktop room; never infer the client id."""
+    if not required:
+        return
+    profile_path = instance_dir / "hermes-data" / "profile.yaml"
+    if not profile_path.is_file():
+        rooms = {}
+    else:
+        meta = _yaml_file(profile_path)
+        if not isinstance(meta, dict):
+            raise InputError(f"profile.yaml must be a mapping: {profile_path}")
+        ui = meta.get("ui_meta")
+        registry = ui.get("hermes-bots-groups") if isinstance(ui, dict) else None
+        rooms = registry.get("rooms") if isinstance(registry, dict) else None
+        if rooms is not None and not isinstance(rooms, dict):
+            raise InputError(f"Desktop rooms registry must be a mapping: {profile_path}")
+    rooms = rooms or {}
+    for key, expected in required.items():
+        room = rooms.get(key)
+        members = room.get("members") if isinstance(room, dict) else None
+        if not isinstance(members, list) or not 2 <= len(members) <= 6 or room.get("tombstone"):
+            _row(checks, instance_dir.name, "default", "required_room_seats", "FAIL",
+                 f"{key}: missing, tombstoned, or not 2-6 saved members; do not activate this room")
+            continue
+        if any(not isinstance(m, dict) or m.get("connectionId") != expected or
+               m.get("connectionKind") != "remote" or not isinstance(m.get("name"), str) or
+               not m["name"] for m in members) or len({m["name"] for m in members}) != len(members):
+            _row(checks, instance_dir.name, "default", "required_room_seats", "FAIL",
+                 f"{key}: saved members do not all match the supplied Desktop connection id "
+                 f"{expected} (remote); ghost seats, duplicates, and a hidden gateway filter are possible")
+            continue
+        _row(checks, instance_dir.name, "default", "required_room_seats", "PASS",
+             f"{key}: {len(members)} remote seats match the supplied Desktop connection id "
+             f"{expected}; client filter, reachability, and replies still need a human check")
+
+
 def run(*, instance_dir: Path | None = None, instances_dir: Path | None = None,
         policy_file: Path | None = None, now: datetime | None = None,
-        verified_connection_ids: Iterable[str] = ()) -> tuple[dict, int]:
+        verified_connection_ids: Iterable[str] = (),
+        require_room_connection: Iterable[str] = ()) -> tuple[dict, int]:
     report = {"schema": SCHEMA, "read_only": True, "scope": "disk-only-no-db-no-runtime",
               "instances": [], "checks": [], "summary": {"FAIL": 0, "WARN": 0, "UNVERIFIED": 0, "PASS": 0}}
     try:
@@ -312,10 +350,27 @@ def run(*, instance_dir: Path | None = None, instances_dir: Path | None = None,
         verified = frozenset(str(value).strip() for value in verified_connection_ids
                              if str(value).strip())
         report["verified_connection_ids"] = sorted(verified)
+        required: dict[str, str] = {}
+        if require_room_connection and instance_dir is None:
+            raise InputError("--require-room-connection needs --instance-dir (one gateway at a time)")
+        for value in require_room_connection:
+            key, sep, connection_id = value.partition("=")
+            if (not sep or not key.startswith(("id:", "name:")) or
+                    not key.split(":", 1)[1] or not connection_id or connection_id == "local"):
+                raise InputError("--require-room-connection needs "
+                                 "id:<room>=<Desktop id> or name:<room>=<Desktop id>")
+            if key in required and required[key] != connection_id:
+                raise InputError(f"conflicting Desktop connection ids for room: {key}")
+            required[key] = connection_id
+        if set(required.values()) - verified:
+            raise InputError("--require-room-connection ids must also be supplied with "
+                             "--verified-connection-id from the affected Desktop")
+        report["required_room_connections"] = required
         for path in paths:
             report["instances"].append(path.name)
             report["checks"].extend(check_instance(path, policy, now=now,
                                                    verified_connection_ids=verified))
+            _required_room_seats(report["checks"], path, required)
         for item in report["checks"]:
             report["summary"][item["status"]] += 1
     except (InputError, OSError) as exc:
@@ -334,11 +389,16 @@ def main(argv: list[str] | None = None) -> int:
                         metavar="ID",
                         help="operator-verified Desktop connection id (repeatable). Read it from the "
                              "Desktop connection registry; it is never derived from a gateway hostname")
+    parser.add_argument("--require-room-connection", action="append", default=[],
+                        metavar="ROOM_KEY=DESKTOP_ID",
+                        help="fail if the exact Desktop room is absent or any of its 2-6 remote "
+                             "seats uses another id; requires --instance-dir and an operator-verified id")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     result, rc = run(instance_dir=args.instance_dir, instances_dir=args.instances_dir,
                      policy_file=args.policy_file,
-                     verified_connection_ids=args.verified_connection_id)
+                     verified_connection_ids=args.verified_connection_id,
+                     require_room_connection=args.require_room_connection)
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:

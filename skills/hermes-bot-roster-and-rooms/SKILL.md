@@ -76,9 +76,10 @@ when they added the connection (lowercased, every non-alphanumeric run becomes
 - **It is never derivable from the gateway hostname, URL, or tailnet name.**
   Two connections on the same host can hold different ids, and an id that looks
   hostname-shaped only got that way because the LABEL was once the hostname.
-- **It only exists on the operator's client.** No gateway log, projection,
-  relay roster, session row, or API response reports another machine's registry
-  id. The host cannot derive or confirm it.
+- **The operator's client owns the id.** A gateway room projection may echo
+  a seat id previously saved by Desktop, but it cannot attest which id is in
+  the affected Desktop's current connection registry. Do not treat a saved
+  seat or hostname as a source of truth for the client's id.
 
 Desktop's roster filters a room by exact seat id
 (`roster-sections.tsx` `filterBotsByGateway` / `groupMatchesRosterFilters`):
@@ -102,14 +103,36 @@ Read the id, never guess it:
 
 `lib/fleet_doctor.py --verified-connection-id <id>` (repeatable) checks saved
 seats against ids you supply; with none supplied it reports them UNVERIFIED
-rather than implying they are right.
+rather than implying they are right. For a specific room, use the fail-closed,
+read-only check (repeat each `--require-room-connection` for other rooms):
 
-**Preferred repair: the Desktop member picker.** Open the room, use Manage
-members, deselect the stale seats, select the live bots, save. Desktop writes
+```
+python3 lib/fleet_doctor.py --instance-dir instances/<fleet> \
+  --verified-connection-id '<id copied from affected Desktop>' \
+  --require-room-connection 'id:<client-room-id>=<same id>'
+```
+
+It fails (exit 1) for absent rooms, empty/overfull seats, duplicate persona
+names, local seats, or even **one** seat with a different id. Missing or
+unsupplied attestation is an input error (exit 2); it never proves what the
+operator's Desktop rendered or that any member replied. Check each affected
+projection and confirm the live Desktop filter and a real member turn before
+claiming the room works. This is an operator check, not an execution guard.
+
+**Preferred repair: the Desktop member picker.** If stale seats do not fill
+its six-seat limit: open the room under All, use Manage members, deselect stale
+seats, select live bots, save. The picker may show *identical names and handles*
+for a ghost and a live bot; do not tell the operator to distinguish by name.
+When six stale seats are preselected, the six real seats are disabled. First
+uncheck all six stale checked rows, then choose live roster rows; or, after
+backups and a separately reviewed narrow CAS clear of the wrong seats, reopen
+the room under All and select the live rows without duplicates. Desktop writes
 the correct descriptors, bumps the room revision and publishes to every
-gateway, so no id has to be transcribed. Note that Save clears removed members'
-sessions, watermarks and holds — harmless for a seat that never took a turn,
-destructive for one mid-round.
+gateway; read all projections back. Save clears removed members' sessions,
+watermarks and holds, so back up the client and projections first. Never wipe
+a container to fix client-synced seats. See
+`../hermes-group-chat-delivery/references/room-registry-surgery.md` for the
+revision-merge and ghost-seat recovery constraints.
 
 ## Prerequisites
 
