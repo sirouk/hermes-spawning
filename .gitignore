@@ -1,0 +1,19 @@
+instances/*
+!instances/.gitkeep
+.tailscale-authkey*
+!.tailscale-authkey.example
+# Fleet endpoint record (secret bearer key) written by deploy.sh
+.model-endpoint*
+# Local agent-manager worktrees and state are not repo source.
+.kilo/
+.kilocode/
+# Local environment credentials (examples can be explicitly reviewed).
+.env
+.env.*
+!.env.example
+lib/__pycache__/
+.cache/
+
+# stack-defaults backups
+stack-defaults.yaml.bak-*
+__pycache__/

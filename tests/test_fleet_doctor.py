@@ -1,0 +1,208 @@
+"""Unit tests for a disk-only fleet doctor; no live Hermes state is opened."""
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+import json
+from pathlib import Path
+import sys
+import tempfile
+import unittest
+from unittest.mock import patch
+
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+import fleet_doctor as doctor
+
+NOW = datetime(2026, 9, 23, 12, tzinfo=timezone.utc)
+
+
+def make_instance(root: Path, name: str = "test-fleet") -> Path:
+    inst = root / name
+    home = inst / "hermes-data"
+    (home / "profiles" / "alice" / "cron").mkdir(parents=True)
+    (home / "cron").mkdir()
+    (inst / "control.env").write_text("COMPOSE_PROJECT_NAME=hermes-test\n")
+    (home / "config.yaml").write_text("cron: {}\n")
+    (home / "profile.yaml").write_text("ui_meta: {}\n")
+    persona = home / "profiles" / "alice"
+    (persona / "config.yaml").write_text("cron: {}\n")
+    (persona / "profile.yaml").write_text("ui_meta: {}\n")
+    return inst
+
+
+def job(kind: str = "cron") -> dict:
+    return {"id": "job-1", "name": "bounded task", "enabled": True,
+            "state": "scheduled", "schedule": {"kind": kind, "expr": "0 */4 * * *"},
+            "next_run_at": (NOW + timedelta(hours=1)).isoformat(),
+            "deliver": "local", "failure_deliver": "local"}
+
+
+def put_jobs(inst: Path, *jobs: dict, profile: str = "alice") -> None:
+    p = inst / "hermes-data" / "profiles" / profile / "cron" / "jobs.json"
+    p.write_text(json.dumps({"jobs": list(jobs)}))
+
+
+def findings(report: dict, name: str) -> list[dict]:
+    return [r for r in report["checks"] if r["check"] == name]
+
+
+class DoctorTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.instance = make_instance(self.root)
+
+    def run_doc(self, **kwargs):
+        return doctor.run(instance_dir=self.instance, now=NOW, **kwargs)
+
+    def test_basic_read_only_warns_without_pretending_delivered(self):
+        put_jobs(self.instance, job())
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 0)
+        self.assertEqual(data["scope"], "disk-only-no-db-no-runtime")
+        self.assertEqual(findings(data, "schedule")[0]["status"], "PASS")
+        self.assertEqual(findings(data, "delivery_route")[0]["status"], "WARN")
+        self.assertEqual(findings(data, "unknown_outcomes")[0]["status"], "UNVERIFIED")
+        self.assertEqual(findings(data, "token_budget")[0]["status"], "UNVERIFIED")
+        self.assertEqual(findings(data, "client_visibility")[0]["status"], "UNVERIFIED")
+
+    def test_missing_kind_or_next_run_is_proven_blocker(self):
+        j = job()
+        del j["schedule"]["kind"]
+        j["next_run_at"] = None
+        put_jobs(self.instance, j)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 1)
+        self.assertEqual(findings(data, "schedule")[0]["status"], "FAIL")
+        self.assertEqual(findings(data, "next_run_at")[0]["status"], "FAIL")
+
+    def test_paused_and_disabled_jobs_are_not_armed(self):
+        a, b = job(), job()
+        a["id"], b["id"] = "paused", "disabled"
+        a["state"], b["enabled"] = "paused", False
+        a["next_run_at"] = b["next_run_at"] = None
+        del a["schedule"]["kind"]
+        del b["schedule"]["kind"]
+        put_jobs(self.instance, a, b)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 0)
+        self.assertFalse(findings(data, "schedule"))
+        self.assertFalse(findings(data, "next_run_at"))
+        self.assertIn("0 active", findings(data, "job_manifest")[1]["detail"])
+
+    def test_missing_enabled_defaults_true_but_explicit_bad_type_errors(self):
+        a = job()
+        del a["enabled"]
+        a["next_run_at"] = None
+        put_jobs(self.instance, a)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 1)
+        self.assertEqual(findings(data, "next_run_at")[0]["status"], "FAIL")
+        a["enabled"] = "false"
+        put_jobs(self.instance, a)
+        _, rc = self.run_doc()
+        self.assertEqual(rc, 2)
+
+    def test_paused_at_also_makes_job_dormant(self):
+        a = job()
+        a["paused_at"] = NOW.isoformat()
+        a["next_run_at"] = None
+        put_jobs(self.instance, a)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 0)
+        self.assertEqual([], findings(data, "next_run_at"))
+
+    def test_timezone_aware_next_run_required_and_overdue_warn(self):
+        a = job(); a["next_run_at"] = "2026-09-23T00:00:00" # no timezone
+        put_jobs(self.instance, a)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 1)
+        self.assertEqual(findings(data, "next_run_at")[0]["status"], "FAIL")
+        a["next_run_at"] = (NOW - timedelta(hours=1)).isoformat()
+        put_jobs(self.instance, a)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 0)
+        self.assertEqual(findings(data, "overdue")[0]["status"], "WARN")
+
+    def test_script_accepts_absolute_inside_scripts_and_ignores_shebang(self):
+        home = self.instance / "hermes-data" / "profiles" / "alice"
+        scripts = home / "scripts"; scripts.mkdir()
+        script = scripts / "job.py"; script.write_text("#!/unavailable/interpreter\npass\n")
+        a = job(); a.update(script=str(script), no_agent=True)
+        put_jobs(self.instance, a)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 0)
+        self.assertEqual(findings(data, "script")[0]["status"], "PASS")
+        a["script"] = "../profile.yaml"
+        put_jobs(self.instance, a)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 1)
+        self.assertEqual(findings(data, "script")[0]["status"], "FAIL")
+
+    def test_declared_handoff_fails_only_when_explicit(self):
+        put_jobs(self.instance, job())
+        policy = self.root / "policy.json"
+        policy.write_text(json.dumps({"schema": 1, "handoff_profiles": {"test-fleet": ["alice"]}}))
+        data, rc = self.run_doc(policy_file=policy)
+        self.assertEqual(rc, 1)
+        self.assertEqual(next(r for r in findings(data, "handoff") if r["profile"] == "alice")["status"], "FAIL")
+        (self.instance / "hermes-data" / "profiles" / "alice" / "handoff").mkdir()
+        data, rc = self.run_doc(policy_file=policy)
+        self.assertEqual(rc, 0)
+        self.assertEqual(next(r for r in findings(data, "handoff") if r["profile"] == "alice")["status"], "PASS")
+
+    def test_malformed_manifest_or_explicit_policy_errors_rc2(self):
+        bad = self.instance / "hermes-data" / "profiles" / "alice" / "cron" / "jobs.json"
+        bad.write_text("{oops")
+        result, rc = self.run_doc()
+        self.assertEqual(rc, 2)
+        self.assertIn("error", result)
+        put_jobs(self.instance, job())
+        bad.write_text("[]")
+        _, rc = self.run_doc()
+        self.assertEqual(rc, 2)
+        put_jobs(self.instance, job())
+        policy = self.root / "policy.json"
+        policy.write_text(json.dumps({"schema": 1, "handoff_profiles": {"test-fleet": ["ghost"]}}))
+        _, rc = self.run_doc(policy_file=policy)
+        self.assertEqual(rc, 2)
+
+    def test_all_aggregate_one_report_and_failure(self):
+        second = make_instance(self.root, "other")
+        put_jobs(self.instance, job())
+        bad = job(); bad["next_run_at"] = None
+        put_jobs(second, bad)
+        data, rc = doctor.run(instances_dir=self.root, now=NOW)
+        self.assertEqual(rc, 1)
+        self.assertEqual(data["instances"], ["other", "test-fleet"])
+        self.assertEqual(data["summary"]["FAIL"], 1)
+
+    def test_does_not_open_sqlite_or_change_instance(self):
+        import sqlite3
+        p = self.instance / "hermes-data" / "profiles" / "alice" / "cron" / "executions.db"
+        p.write_bytes(b"not a database")
+        put_jobs(self.instance, job())
+        files_before = {str(x.relative_to(self.instance)): (x.stat().st_size, x.stat().st_mtime_ns)
+                        for x in self.instance.rglob("*") if x.is_file()}
+        with patch.object(sqlite3, "connect", side_effect=AssertionError("SQLite opened")):
+            data, rc = self.run_doc()
+        self.assertEqual(rc, 0)
+        self.assertEqual(findings(data, "unknown_outcomes")[0]["status"], "UNVERIFIED")
+        files_after = {str(x.relative_to(self.instance)): (x.stat().st_size, x.stat().st_mtime_ns)
+                       for x in self.instance.rglob("*") if x.is_file()}
+        self.assertEqual(files_before, files_after)
+
+    def test_desktop_registry_not_backend_room_and_not_proof(self):
+        profile = self.instance / "hermes-data" / "profiles" / "alice" / "profile.yaml"
+        profile.write_text('ui_meta:\n  hermes-bots-groups:\n    rooms:\n      "name:Local": {roomId: null, log: [{text: hi}]}\n')
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 0)
+        row = next(r for r in findings(data, "desktop_registry") if r["profile"] == "alice")
+        self.assertEqual(row["status"], "UNVERIFIED")
+        self.assertIn("1 Desktop", row["detail"])
+        self.assertIn("not verified", row["detail"])
+
+
+if __name__ == "__main__":
+    unittest.main()

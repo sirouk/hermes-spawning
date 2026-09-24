@@ -1,0 +1,251 @@
+# =============================================================================
+# Fleet model-stack defaults — single source of truth for this repository.
+#
+# Read by:
+#   deploy.sh                 (host verification: required models, ports, layers)
+#   lib/apply_stack.py        (writes/audits these values into every Hermes
+#                              instance's default + persona configs)
+#   hermes-spawn.sh apply-stack / stack-status
+#
+# The one endpoint everything talks through is the host CLIProxy, managed by
+# CCS: http://<host-tailscale-ip>:<endpoint.port>/v1 with a bearer API key
+# (deploy.sh mints a dedicated fleet key and records it in .model-endpoint).
+# =============================================================================
+version: 1
+
+endpoint:
+  port: 8317
+  path: /v1
+  # Fallback auth key if deploy.sh never ran (CCS's built-in passthrough key).
+  fallback_api_key: ccs-internal-managed
+
+models:
+  primary:
+    name: claude-opus-5-5        # Claude Opus 5.5 via Claude OAuth
+    provider: ccs-anthropic
+    reasoning_effort: max
+  fallbacks:
+    - name: gpt-6-sol            # GPT-6 Sol via Codex OAuth
+      provider: ccs-astra
+      reasoning_effort: max
+    - name: kimi-k3              # Kimi K3 via Chutes
+      provider: ccs-kimi
+      reasoning_effort: max
+    - name: deepseek-v4-flash-0731  # DeepSeek V4 Flash 0731 via Chutes
+      provider: ccs-deepseek
+      reasoning_effort: max
+    - name: glm-5.2              # GLM-5.2 via Chutes
+      provider: ccs-glm
+      reasoning_effort: max
+
+# Models that must be served by the one endpoint before a fleet is healthy.
+required_endpoint_models:
+  - claude-opus-5-5
+  - gpt-6-sol
+  - claude-haiku-4-5-20251001
+  - kimi-k3
+  - deepseek-v4-flash-0731
+  - glm-5.2
+
+# Chutes OpenAI-compatible upstreams served through the one endpoint.
+chutes:
+  upstream_name: chutes
+  base_url: https://llm.chutes.ai/v1
+  models:
+    - {name: moonshotai/Kimi-K3-TEE,               alias: kimi-k3}
+    - {name: moonshotai/Kimi-K2.6-TEE,             alias: kimi-k2.6}
+    - {name: zai-org/GLM-5.2-TEE,                  alias: glm-5.2}
+    - {name: deepseek-ai/DeepSeek-V3.2-TEE,        alias: deepseek-v3.2}
+    - {name: deepseek-ai/DeepSeek-V4-Flash-0731-TEE, alias: deepseek-v4-flash-0731}
+
+# Custom providers written into every default + persona config.
+# base_url / api_key are filled at apply time from .model-endpoint or the
+# control file, so configs stay correct when the endpoint moves.
+providers:
+  ccs-astra:
+    model: gpt-6-sol
+    api_mode: chat_completions
+    extra_body: {reasoning_effort: max}
+    models: [gpt-6-sol]
+  ccs-anthropic:
+    model: claude-opus-5-5
+    api_mode: anthropic_messages
+    models: [claude-opus-5-5]
+  ccs-kimi:
+    model: kimi-k3
+    models: [kimi-k3]
+  ccs-deepseek:
+    model: deepseek-v4-flash-0731
+    models: [deepseek-v4-flash-0731]
+  ccs-glm:
+    model: glm-5.2
+    models: [glm-5.2]
+
+# Auxiliary (background) model for the auxiliary tasks, every persona.
+# Two hard-won reliability guards are part of the canonical policy:
+#   reasoning_effort: '' — background lanes explicitly carry NO reasoning
+#     effort field (server default). An inherited high effort on a background
+#     lane turns small calls into minutes inside the agent's 600 s wrapper
+#     and liaisons with the 60 s failed-provider skip list. Explicitly empty
+#     is the loud, audited version of "do not inhale the persona's effort".
+#   fallback_chain — the aux lane keeps its own ladder on a DIFFERENT quota
+#     bucket than the Claude OAuth lane, so a 429 storm on the OAuth account
+#    degrades background tasks instead of bricking title/summaries for hours.
+auxiliary:
+  provider: ccs-anthropic
+  model: claude-haiku-4-5-20251001
+  reasoning_effort: ''
+  fallback_chain:
+    - {provider: ccs-kimi, model: kimi-k3}
+    - {provider: ccs-deepseek, model: deepseek-v4-flash-0731}
+  tasks:
+    - title_generation
+    - session_search
+    - flush_memories
+    - approval
+    - mcp
+    - skills_hub
+    - profile_describer
+    - tts_audio_tags
+    - compression
+  prefer_fast_model_tasks:
+    - title_generation
+
+agent:
+  reasoning_effort: max
+  reasoning_overrides: {}
+
+compression:
+  threshold: 0.25
+  # Compression must read the WHOLE context and then write a summary, so its
+  # budget scales with how slow the summary endpoint is. The upstream 600s
+  # default is tuned for fast cloud models; measured on a local 27B GGUF
+  # a ~141k-token session needs well beyond that, and the failure is
+  # silent-ish: "reached its total ceiling ... continuing without compression",
+  # then a 300s cooldown blocks retries while the session keeps growing.
+  # 2400s is generous for cloud endpoints and realistic for self-hosted ones.
+  context_total_ceiling_seconds: 2400   # hard total budget (non-positive = ignored)
+  context_timeout_seconds: 600          # idle/no-progress window (0 or less disables)
+
+# MEMORY.md / USER.md budget.
+# Hermes ships 2200/1375 chars. That is ~800 tokens and far too small for a
+# fleet that must hold doctrine, orientation, and durable lessons at once.
+# The cap is not a truncation: over the limit entries still load into the
+# prompt, but every later `memory add` is refused (upstream #10877), which
+# silently freezes the learning loop. These values buy real headroom while
+# staying a deliberate budget rather than an unbounded dump.
+memory:
+  memory_char_limit: 24000
+  user_char_limit: 8000
+
+approvals:
+  mode: 'off'
+  cron_mode: approve
+  single_query_mode: approve
+  unattended_mode: approve
+  mcp_reload_confirm: false
+  destructive_slash_confirm: false
+
+# Shared, read-only fleet skills. Existing persona-local external dirs survive.
+skills:
+  external_dirs:
+    - /opt/data/fleet-skills
+
+# Reactions off everywhere they can appear (reactions make a mess of
+# notifications). Env vars win over YAML in Hermes, so both layers are set.
+reactions_off:
+  config:
+    discord:
+      reactions: false
+    telegram:
+      reactions: false
+  display:
+    message_reactions: false
+  platform_extra:
+    - slack
+    - matrix
+    - mattermost
+  env:
+    TELEGRAM_REACTIONS: 'false'
+    DISCORD_REACTIONS: 'false'
+    SLACK_REACTIONS: 'false'
+    MATRIX_REACTIONS: 'false'
+    SIGNAL_REACTIONS: 'false'
+    FEISHU_REACTIONS: 'false'
+
+# Expanded thinking for every persona.
+thinking:
+  show_reasoning: true
+  thinking_mode: full       # expanded (TUI /thinking full)
+  details_mode: expanded    # legacy compat bridge, kept in sync by Hermes anyway
+
+# Scheduled jobs: rely on the persona config. A job that needs a specific
+# model for optimal performance may pin model/provider on the job itself —
+# apply-stack leaves job pins alone and stack-status reports them.
+cron:
+  model: ''
+  model_provider: ''
+
+# Multiplex is enabled at first startup. Reserve six-persona capacity so a
+# founder plus five later personas can join via native rescan without restart.
+# Larger crews scale with the same bounded formula:
+#   N = max(min_personas, number_of_personas)
+#   concurrent runs = clamp(N * per_persona, min, cap)
+#   live sessions = min(N + live_sessions_margin, live_sessions_cap)
+backends:
+  min_personas: 6
+  multiplex_profiles: true
+  auto_multiplex_migration: true
+  min_concurrent_runs: 10
+  per_persona: 2
+  cap_concurrent_runs: 32
+  live_sessions_margin: 8
+  live_sessions_cap: 128
+
+# ------------------------------------------------------------- timeouts (env)
+# Keep a backstop without cutting off long busy turns or compaction.
+# HERMES_AGENT_TIMEOUT is the gateway inactivity kill for a RUNNING agent;
+# stock default is 1800s (30m) — bumped 8x here. 0 = unlimited (kept off
+# by default so a wedged agent still has a backstop; use 0 only for dedicated
+# long-research instances seen from tools that quote hermes tips).
+timeouts:
+  env:
+    # 4h gateway inactivity kill (was 30m default)
+    HERMES_AGENT_TIMEOUT: "14400"
+    # pre-kill warning at 1h (was 15m default)
+    HERMES_AGENT_TIMEOUT_WARNING: "3600"
+
+# ------------------------------------------------------------- webui (per spawn)
+# Every spawn gets one hermes-webui chat UI by default: vendored at apply time from the
+# pinned ref below, loopback-bound inside the instance netns on <listen_port>, gateway
+# backend pointed at the per-instance API (127.0.0.1:8642 with that instance's
+# API_SERVER_KEY), served tailnet-only on <route_path> of the node hostname. The spawn
+# flow installs + launches it; scripts/fleet-supervisor.sh keeps it and the serve
+# routes alive across container restarts. creds: ./hermes-spawn.sh credentials <inst>.
+webui:
+  enabled: true
+  source: https://github.com/nesquena/hermes-webui.git
+  ref: 2cf8e8a5eae5a42deaa888d027c408defbe76eae
+  route_path: /webui
+  listen_port: 8787
+  # Hermex (the iOS client, github.com/uzairansaruzi/hermex) strips the path from
+  # the server URL it is given (AuthManager.normalizedServerURL sets
+  # `components.path = ""`), then calls /health, /api/auth/status and
+  # /api/auth/login on the ORIGIN. A sub-path mount such as /webui therefore can
+  # never work with it: those calls land on the dashboard instead and return
+  # 302 / 401 no_cookie. So the webui also gets its own HTTPS port-origin, which
+  # the app does keep. Both routes stay live: /webui for desktop browsers,
+  # :8788 for Hermex and any other root-origin client.
+  serve_port: 8788
+
+# Runtime tiers: "heavy" instances get generous compose resource caps via control.env
+# (HERMES_CPUS / HERMES_MEMORY / HERMES_MEMORY_RESERVATION / HERMES_SHM_SIZE /
+#  HERMES_PIDS_LIMIT / HERMES_STOP_GRACE_PERIOD). See README "Heavy spawns".
+
+# Host-side cliproxy clipboard notes for deploy.sh.
+host:
+  ccs_npm_package: '@kaitranntt/ccs'
+  claude_oauth_service: claude
+  codex_oauth_service: codex
+  systemd_unit_name: ccs-cliproxy.service
+  fleet_api_key_prefix: hermes-fleet

@@ -1,0 +1,14 @@
+[Unit]
+Description=hermes-spawning fleet supervisor (webui + Tailscale serve routes)
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+Environment=HERMES_SPAWNING_REPO=@HERMES_SPAWNING_REPO@
+ExecStart=@HERMES_SPAWNING_REPO@/scripts/fleet-supervisor.sh
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
