@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 import json
 from pathlib import Path
 import sys
-from typing import Any
+from typing import Any, Iterable
 
 import yaml
 
@@ -178,7 +178,21 @@ def _job_checks(checks: list[dict], instance: str, profile: str, root: Path,
              job_id=job_id)
 
 
-def _room_check(checks: list[dict], instance: str, profile: str, home: Path) -> None:
+def _member_ids(room: Any) -> list[str]:
+    """Remote member connection ids saved in one ui_meta room, in order."""
+    members = room.get("members") if isinstance(room, dict) else None
+    ids: list[str] = []
+    for member in members if isinstance(members, list) else []:
+        if not isinstance(member, dict):
+            continue
+        value = member.get("connectionId")
+        if isinstance(value, str) and value.strip() and value.strip() != "local":
+            ids.append(value.strip())
+    return ids
+
+
+def _room_check(checks: list[dict], instance: str, profile: str, home: Path,
+                verified_connection_ids: frozenset[str] = frozenset()) -> None:
     meta_path = home / "profile.yaml"
     if not meta_path.exists():
         _row(checks, instance, profile, "desktop_registry", "UNVERIFIED",
@@ -197,10 +211,45 @@ def _room_check(checks: list[dict], instance: str, profile: str, home: Path) -> 
     count = len(rooms) if isinstance(rooms, dict) else 0
     _row(checks, instance, profile, "desktop_registry", "UNVERIFIED",
          f"{count} Desktop ui_meta room(s) on disk; client sync, visibility, backend rooms, and delivery not verified")
+    # Connection identity of saved room seats. A Desktop registry id is minted
+    # from the connection LABEL the operator typed; it is NEVER derivable from
+    # a gateway hostname, URL, or tailnet name, and a rename keeps the old id.
+    # Desktop's roster gateway filter keeps a room only when some seated member
+    # connectionId equals the selected source id, so a wrong id renders the room
+    # under "all" and hides it under its own gateway. The host cannot read the
+    # operator's connections.json, so ids are UNVERIFIED unless supplied.
+    for key, room in sorted((rooms or {}).items()):
+        if not isinstance(room, dict) or room.get("tombstone"):
+            continue
+        ids = _member_ids(room)
+        if not ids:
+            continue
+        unique = sorted(set(ids))
+        if not verified_connection_ids:
+            _row(checks, instance, profile, "room_connection_identity", "UNVERIFIED",
+                 f"{key}: {len(ids)} remote seat(s) on {', '.join(unique)}; no operator-verified "
+                 "connection id supplied (--verified-connection-id). Copy the id from the Desktop "
+                 "registry (connections.json id / host.agents source); never derive it from a hostname")
+            continue
+        unknown = sorted(set(ids) - verified_connection_ids)
+        if unknown:
+            _row(checks, instance, profile, "room_connection_identity", "WARN",
+                 f"{key}: seat connection id(s) {', '.join(unknown)} are not operator-verified "
+                 f"(verified: {', '.join(sorted(verified_connection_ids))}); Desktop's gateway filter "
+                 "hides the room under that gateway and turns cannot route to those seats")
+        if not set(ids) & verified_connection_ids:
+            _row(checks, instance, profile, "room_connection_identity", "WARN",
+                 f"{key}: no seat uses a verified connection id; the room cannot appear under any "
+                 "verified gateway filter")
+        elif not unknown:
+            _row(checks, instance, profile, "room_connection_identity", "PASS",
+                 f"{key}: all {len(ids)} remote seat(s) use operator-verified connection id(s) "
+                 f"{', '.join(unique)}; client rendering and delivery still unverified")
 
 
 def check_instance(instance_dir: Path, handoff_policy: dict[str, list[str]],
-                   now: datetime | None = None) -> list[dict]:
+                   now: datetime | None = None,
+                   verified_connection_ids: frozenset[str] = frozenset()) -> list[dict]:
     instance_dir = Path(instance_dir)
     if not instance_dir.is_dir():
         raise InputError(f"instance directory missing: {instance_dir}")
@@ -232,7 +281,7 @@ def check_instance(instance_dir: Path, handoff_policy: dict[str, list[str]],
         else:
             _row(checks, instance, profile, "handoff", "UNVERIFIED",
                  "no explicit file-first handoff policy for this profile; not assumed required")
-        _room_check(checks, instance, profile, path)
+        _room_check(checks, instance, profile, path, verified_connection_ids)
     _row(checks, instance, "*", "unknown_outcomes", "UNVERIFIED",
          "live execution DB deliberately not opened; unknown outcomes cannot be ruled out")
     _row(checks, instance, "*", "token_budget", "UNVERIFIED",
@@ -243,7 +292,8 @@ def check_instance(instance_dir: Path, handoff_policy: dict[str, list[str]],
 
 
 def run(*, instance_dir: Path | None = None, instances_dir: Path | None = None,
-        policy_file: Path | None = None, now: datetime | None = None) -> tuple[dict, int]:
+        policy_file: Path | None = None, now: datetime | None = None,
+        verified_connection_ids: Iterable[str] = ()) -> tuple[dict, int]:
     report = {"schema": SCHEMA, "read_only": True, "scope": "disk-only-no-db-no-runtime",
               "instances": [], "checks": [], "summary": {"FAIL": 0, "WARN": 0, "UNVERIFIED": 0, "PASS": 0}}
     try:
@@ -259,9 +309,13 @@ def run(*, instance_dir: Path | None = None, instances_dir: Path | None = None,
             paths = sorted(p for p in base.iterdir() if p.is_dir() and (p / "control.env").is_file())
             if not paths:
                 raise InputError(f"no instance directories with control.env: {base}")
+        verified = frozenset(str(value).strip() for value in verified_connection_ids
+                             if str(value).strip())
+        report["verified_connection_ids"] = sorted(verified)
         for path in paths:
             report["instances"].append(path.name)
-            report["checks"].extend(check_instance(path, policy, now=now))
+            report["checks"].extend(check_instance(path, policy, now=now,
+                                                   verified_connection_ids=verified))
         for item in report["checks"]:
             report["summary"][item["status"]] += 1
     except (InputError, OSError) as exc:
@@ -276,10 +330,15 @@ def main(argv: list[str] | None = None) -> int:
     group.add_argument("--instance-dir", type=Path)
     group.add_argument("--instances-dir", type=Path)
     parser.add_argument("--policy-file", type=Path, help="optional JSON {schema:1,handoff_profiles:{instance:[profile]}}")
+    parser.add_argument("--verified-connection-id", action="append", default=[],
+                        metavar="ID",
+                        help="operator-verified Desktop connection id (repeatable). Read it from the "
+                             "Desktop connection registry; it is never derived from a gateway hostname")
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     result, rc = run(instance_dir=args.instance_dir, instances_dir=args.instances_dir,
-                     policy_file=args.policy_file)
+                     policy_file=args.policy_file,
+                     verified_connection_ids=args.verified_connection_id)
     if args.json:
         print(json.dumps(result, sort_keys=True))
     else:

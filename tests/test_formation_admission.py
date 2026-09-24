@@ -419,6 +419,37 @@ class FormationAdmissionTests(unittest.TestCase):
         sidecar.symlink_to(self.home / "config.yaml")
         self.assertEqual(self.decision()["reason"], "unsafe_reference")
 
+    def test_connection_id_is_the_client_registry_slug_not_a_hostname_guess(self):
+        """A Desktop registry id is minted from the connection LABEL. It need not
+        contain the control.env hostname and need not end -ts-net; requiring that
+        shape rejected real registries and invited hostname-derived guesses. The
+        attested id must still match every saved seat exactly."""
+        saved = self.registry["ui_meta"]["hermes-bots-groups"]["rooms"]
+        for connection_id in ("workshop", "homelab", "synthetic-2", "a" * 48):
+            with self.subTest(connection_id=connection_id):
+                self.data["member_connection"]["id"] = connection_id
+                for room in saved.values():
+                    for member in room["members"]:
+                        member["connectionId"] = connection_id
+                self.save_registry()
+                self.decision(0)
+        # A seat that disagrees with the attested id is still refused: that is
+        # exactly the ghost-seat shape a guessed hostname id produces.
+        for member in saved[ROOMS["coordination"]]["members"]:
+            member["connectionId"] = "some-other-connection"
+        self.save_registry()
+        self.assertEqual(self.decision()["reason"], "invalid_room_registry")
+        for member in saved[ROOMS["coordination"]]["members"]:
+            member["connectionId"] = "a" * 48
+        self.save_registry()
+        self.decision(0)
+        # Shapes that are not registry slugs remain refused.
+        for bad in ("Homelab", "home lab", "home_lab", "-home", "home-", "", "a" * 49, "local"):
+            with self.subTest(bad=bad):
+                self.data["member_connection"]["id"] = bad
+                self.publish()
+                self.assertEqual(self.decision()["reason"], "invalid_connection")
+
     def test_remote_identity_and_bounded_thread_are_not_name_only(self):
         native = self.home / "profile.yaml"
         for change in (

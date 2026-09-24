@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 sys.dont_write_bytecode = True
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "lib"))
+import yaml
+
 import fleet_doctor as doctor
 
 NOW = datetime(2026, 9, 23, 12, tzinfo=timezone.utc)
@@ -202,6 +204,76 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(row["status"], "UNVERIFIED")
         self.assertIn("1 Desktop", row["detail"])
         self.assertIn("not verified", row["detail"])
+
+
+    def seat_room(self, *connection_ids: str, key: str = "id:room-1") -> None:
+        """Save one Desktop ui_meta room whose remote seats use the given ids."""
+        members = [{"name": f"bot{n}", "connectionId": cid, "connectionKind": "remote",
+                    "connectionLabel": "gw", "sourceScoped": True}
+                   for n, cid in enumerate(connection_ids)]
+        profile = self.instance / "hermes-data" / "profiles" / "alice" / "profile.yaml"
+        profile.write_text(yaml.safe_dump({"ui_meta": {"hermes-bots-groups": {"rooms": {
+            key: {"name": "Room", "roomId": key[3:], "revision": 4,
+                  "members": members, "log": [{"text": "hi"}]}}}}}, sort_keys=False))
+
+    def identity_rows(self, **kwargs):
+        data, rc = self.run_doc(**kwargs)
+        return [r for r in findings(data, "room_connection_identity")], rc
+
+    def test_room_seat_connection_ids_are_unverified_without_operator_input(self):
+        """The host cannot read the operator's Desktop registry, so a saved seat id
+        is reported, never asserted. It must not read as verified or as a pass."""
+        self.seat_room("gw-guessed", "gw-guessed")
+        rows, rc = self.identity_rows()
+        self.assertEqual(rc, 0)
+        self.assertEqual([r["status"] for r in rows], ["UNVERIFIED"])
+        self.assertIn("gw-guessed", rows[0]["detail"])
+        self.assertIn("never derive it from a hostname", rows[0]["detail"])
+
+    def test_seats_off_the_verified_connection_warn_as_filter_hidden(self):
+        """A hostname-derived guess seats ghosts: Desktop's gateway filter keeps a
+        room only when a seat id equals the selected source id."""
+        self.seat_room("gw-hostname-ts-net", "gw-hostname-ts-net")
+        rows, rc = self.identity_rows(verified_connection_ids=["gw-real"])
+        self.assertEqual(rc, 0)
+        self.assertEqual({r["status"] for r in rows}, {"WARN"})
+        self.assertIn("not operator-verified", rows[0]["detail"])
+        self.assertIn("no seat uses a verified connection id", rows[1]["detail"])
+
+    def test_fully_verified_seats_pass_without_claiming_client_delivery(self):
+        self.seat_room("gw-real", "gw-real")
+        rows, rc = self.identity_rows(verified_connection_ids=["gw-real", " "])
+        self.assertEqual(rc, 0)
+        self.assertEqual([r["status"] for r in rows], ["PASS"])
+        self.assertIn("still unverified", rows[0]["detail"])
+
+    def test_mixed_seats_warn_even_when_one_seat_is_verified(self):
+        self.seat_room("gw-real", "gw-stale")
+        rows, rc = self.identity_rows(verified_connection_ids=["gw-real"])
+        self.assertEqual(rc, 0)
+        self.assertEqual([r["status"] for r in rows], ["WARN"])
+        self.assertIn("gw-stale", rows[0]["detail"])
+
+    def test_local_seats_and_tombstones_are_not_connection_findings(self):
+        profile = self.instance / "hermes-data" / "profiles" / "alice" / "profile.yaml"
+        profile.write_text(yaml.safe_dump({"ui_meta": {"hermes-bots-groups": {"rooms": {
+            "id:local-room": {"members": [{"name": "b", "connectionId": "local",
+                                           "connectionKind": "local"}], "log": []},
+            "id:gone": {"tombstone": True,
+                        "members": [{"name": "b", "connectionId": "gw-x",
+                                     "connectionKind": "remote"}], "log": []}}}}},
+            sort_keys=False))
+        rows, rc = self.identity_rows(verified_connection_ids=["gw-real"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(rows, [])
+
+    def test_verified_ids_are_reported_and_never_make_a_fleet_ready(self):
+        self.seat_room("gw-real")
+        data, rc = self.run_doc(verified_connection_ids=["gw-real"])
+        self.assertEqual(rc, 0)
+        self.assertEqual(data["verified_connection_ids"], ["gw-real"])
+        client = next(r for r in findings(data, "client_visibility"))
+        self.assertEqual(client["status"], "UNVERIFIED")
 
 
 if __name__ == "__main__":

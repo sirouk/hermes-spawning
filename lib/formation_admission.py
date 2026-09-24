@@ -23,7 +23,8 @@ Strict JSON schema v1 (unknown or duplicate keys fail):
  "roles": [{"role": "founder", "profile": "default"}, ...six distinct roles
            and six distinct profiles, exactly root + five native profiles...],
  "rooms": {"coordination": "id:<client_room_id>", "retrospective": "name:Retro"},
- "member_connection": {"id":"HOSTNAME-tail...-ts-net", "kind":"remote", "label":"HOSTNAME"},
+ "member_connection": {"id":"<exact Desktop registry connection id>", "kind":"remote",
+                       "label":"<Desktop connection label>"},
  "operator_declaration": {"name": "human name", "signed_at": "...Z",
     "statement": "I accept the bound operating map and this crew for mission-buildout only"},
  "human_client_witness": {"observer": "human name", "observed_at": "...Z",
@@ -72,8 +73,11 @@ null and a matching name. Both need active revisions (id tombstones are final;
 legacy name tombstones are revision-gated) and all six profiles as members with
 the operator-attested exact connection id/kind/label and no known source-missing
 or source-unreachable flag. A hosted groups.send/engine-only room does not meet
-this root ui_meta requirement. A remote connection
-id must start with the bound control.env TAILSCALE_HOSTNAME and end -ts-net.
+this root ui_meta requirement. A remote connection id must be a Desktop registry
+slug the operator read from their own client (connections.json id / host.agents
+source). It is minted from the connection LABEL, survives renames, and is never
+derived from a gateway hostname, URL, or tailnet name; a guessed id seats ghost
+members that Desktop's gateway filter hides and turns cannot reach.
 The coordination room's saved log must contain the witnessed user post and
 named member-profile reply with exact ids/text, source, common thread, and
 ordered timestamps inside the bound formation cycle.
@@ -118,6 +122,13 @@ STAMP = timedelta(hours=24)
 HEX = re.compile(r"[0-9a-f]{64}\Z")
 IDENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
 MAP_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
+# A Desktop connection id is a registry slug minted from the connection LABEL
+# the operator typed (lowercase, non-alphanumeric collapsed to "-", <=48 chars,
+# "-2"/"-3" on collision). It is NOT derivable from a gateway hostname, URL, or
+# tailnet name, and a later rename keeps the original id. Only the operator can
+# read it from the Desktop registry, so the exact value is attested here and
+# matched against every saved room seat, never reconstructed from the host.
+CONNECTION_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
 CHUNK = 128 * 1024
 MAX_RECEIPT = 128 * 1024
 MAX_METADATA = 4 * 1024 * 1024
@@ -495,7 +506,9 @@ def _accepted(root: int, instance: str, scope: str, now: datetime) -> None:
     _text(connection["label"], "invalid_connection")
     _need(connection["kind"] in ("remote", "local") and
           ((connection_id == "local" and connection["kind"] == "local") or
-           (connection_id.endswith("-ts-net") and connection["kind"] == "remote")),
+           (connection["kind"] == "remote" and connection_id != "local"
+            and len(connection_id) <= 48
+            and CONNECTION_ID.fullmatch(connection_id) is not None)),
           "invalid_connection")
     operator = _keys(receipt["operator_declaration"],
                      {"name", "signed_at", "statement"}, "invalid_operator")
@@ -538,9 +551,11 @@ def _accepted(root: int, instance: str, scope: str, now: datetime) -> None:
                      if line.startswith("TAILSCALE_HOSTNAME=")]
     except UnicodeError:
         raise Denied("invalid_connection") from None
-    _need(len(hostnames) == 1 and IDENT.fullmatch(hostnames[0]) is not None
-          and (connection_id == "local" or
-               connection_id.startswith(hostnames[0] + "-")),
+    # The control.env hostname binds the instance, NOT the Desktop connection
+    # id: the id comes from the operator's client registry and frequently does
+    # not contain the hostname at all. Requiring a hostname prefix here
+    # rejected legitimate registries and invited hostname-derived guesses.
+    _need(len(hostnames) == 1 and IDENT.fullmatch(hostnames[0]) is not None,
           "invalid_connection")
     _ref(root, bindings["fleet_skills"], expected="hermes-data/fleet-skills", tree=True)
     map_ref = bindings["operating_map"]

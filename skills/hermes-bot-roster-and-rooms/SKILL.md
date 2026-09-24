@@ -64,6 +64,53 @@ state and/or the `profile.yaml` projection. The Desktop does not read
 `hosted_rooms` to build its list. A saved projection read alone cannot prove
 what an already-open Desktop client displays.
 
+## Connection identity — the seat id is the client's, not the host's
+
+Every saved room seat carries a `connectionId`. That value is a **Desktop
+connection-registry id**, minted from the connection LABEL the operator typed
+when they added the connection (lowercased, every non-alphanumeric run becomes
+`-`, truncated to 48 chars, `-2`/`-3` appended on collision). Consequences:
+
+- **A rename keeps the original id.** A connection now displayed as `prod-gw`
+  can still be `10-0-0-4-9119` or `prod-gw-2` underneath.
+- **It is never derivable from the gateway hostname, URL, or tailnet name.**
+  Two connections on the same host can hold different ids, and an id that looks
+  hostname-shaped only got that way because the LABEL was once the hostname.
+- **It only exists on the operator's client.** No gateway log, projection,
+  relay roster, session row, or API response reports another machine's registry
+  id. The host cannot derive or confirm it.
+
+Desktop's roster filters a room by exact seat id
+(`roster-sections.tsx` `filterBotsByGateway` / `groupMatchesRosterFilters`):
+
+```
+inGateway = members.filter(m => String(m.connectionId) === selectedConnectionId)
+if (selectedConnectionId !== 'all' && inGateway.length === 0) -> room hidden
+```
+
+So a **wrong id is not cosmetic**. The room still renders under the `all`
+gateway (its log is intact), disappears under its own gateway, and each seat
+resolves to a ghost descriptor no live roster row matches — meaning a round
+cannot route a turn to that member at all.
+
+Read the id, never guess it:
+
+- Desktop connection list / `hermes:connections:list`, or
+- the registry file at Electron `app.getPath('userData')/connections.json`,
+  printing **only** `id`, `label`, `kind` — that file also holds encrypted
+  tokens, so never copy it whole.
+
+`lib/fleet_doctor.py --verified-connection-id <id>` (repeatable) checks saved
+seats against ids you supply; with none supplied it reports them UNVERIFIED
+rather than implying they are right.
+
+**Preferred repair: the Desktop member picker.** Open the room, use Manage
+members, deselect the stale seats, select the live bots, save. Desktop writes
+the correct descriptors, bumps the room revision and publishes to every
+gateway, so no id has to be transcribed. Note that Save clears removed members'
+sessions, watermarks and holds — harmless for a seat that never took a turn,
+destructive for one mid-round.
+
 ## Prerequisites
 
 - For the read-only registry script, use an interpreter with `yaml` (PyYAML),
