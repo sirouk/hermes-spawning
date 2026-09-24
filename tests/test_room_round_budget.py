@@ -59,6 +59,9 @@ class FakeRPC:
 
 
 class RoomRoundTests(unittest.TestCase):
+    def test_current_client_thread_id_shape(self):
+        self.assertRegex(room.mint_thread_id(), r"^t[0-9a-z]+-[0-9a-f]{5}$")
+
     def setUp(self):
         self.clock = Clock()
         self.clock_patches = (patch.object(room.time, "monotonic", self.clock.monotonic),

@@ -18,21 +18,27 @@ writes. Confirm what the operator actually sees after startup or reconnect.
 
 ## Room keys: do not invert their meaning
 
-From Desktop `apps/desktop/src/plugins/hermes-bots/group-chat.ts`, the key is
-`id:<roomId>` when an ID is set and `name:<Display>` otherwise:
+From Desktop `apps/desktop/src/plugins/hermes-bots/create-dialog.tsx`, new
+rooms get `roomId = mintGroupRoomId()` (a **client-minted room identity**).
+`group-chat.ts` then keys the `ui_meta` projection with
+`groupChatRoomKey()`: `id:<roomId>` when an ID is set, `name:<Display>`
+otherwise. Its `pullGroupChatServerState()` merges the projection into the
+client's rooms; therefore an ID-keyed projection can render in Desktop.
 
 ```
-name:<Display>  roomId: null; normal, healthy Desktop-native room
-id:<roomId>    ID-keyed projection, NOT proof of Desktop/hosted engine delivery
+id:<client_room_id>  current Desktop-created room, rendered via ui_meta on pull
+name:<Display>      roomId: null; valid, potentially active legacy Desktop room
+id:<roomId>        ID key alone says nothing about hosted-engine binding
 ```
 
-A `name:`/null room may hold the transcript the human is viewing. It is **not**
-a legacy defect. Setting a hosted-engine `roomId`, replacing the name key with
-`id:<engineRoomId>`, or recreating its empty log would destroy the wrong
-surface. A prior attempted conversion resulted in empty sidebar rooms while
-an untouched name-keyed, null-ID room held the operator's real discussion.
-Never infer Desktop visibility from an engine row, an `id:` key, a successful
-engine send, or a `profile.yaml` read.
+A `name:`/null room may hold the transcript the human is viewing. It is
+**not** a defect, even though current new rooms use client-minted IDs. Never
+replace its key with `id:<engineRoomId>`, bind it to a hosted-engine ID, or
+recreate its empty log: a prior conversion resulted in empty sidebar rooms
+while the untouched name-keyed, null-ID room held the operator's real
+discussion. A client-minted `roomId` is not a `hosted_rooms.room_id` by
+implication. Never infer *live* Desktop visibility from an engine row, an
+`id:` key, a successful engine send, or a `profile.yaml` read.
 
 ## Tombstone semantics (diagnostic only)
 
@@ -71,8 +77,11 @@ profile list; remote members can have a different connection identity.
 2. Run `scripts/rebuild_room_registry.py --profile-yaml <path> --verify`.
    This historical filename is now **read-only**. Default mode is read-only
    too. It replays tombstones on a copy, accepts healthy `name:`/null rooms,
-   and can compare members with `--personas bot-a,bot-b`. It does not inspect
-   hosted engine state; `--engine` is rejected, and `--apply` is disabled.
+   and can compare members with `--personas bot-a,bot-b`. If only `id:` keys
+   survive, its `CHECK NEEDED` result is **not** a finding that current
+   Desktop-created ID rooms are broken or engine-bound; confirm client state.
+   It does not inspect hosted engine state; `--engine` is rejected and
+   `--apply` is disabled.
 3. Ask the operator to inspect the actual Desktop room after client startup
    or reconnect. A saved projection check alone cannot say what is rendered
    in a currently open app, nor confirm delivery or resolve unsynced local

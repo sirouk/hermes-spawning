@@ -22,7 +22,7 @@ Strict JSON schema v1 (unknown or duplicate keys fail):
  "accepted_at": "2026-09-23T12:00:00Z", "map_version": "v0",
  "roles": [{"role": "founder", "profile": "default"}, ...six distinct roles
            and six distinct profiles, exactly root + five native profiles...],
- "rooms": {"coordination": "name:Coordination", "retrospective": "name:Retro"},
+ "rooms": {"coordination": "id:<client_room_id>", "retrospective": "name:Retro"},
  "member_connection": {"id":"HOSTNAME-tail...-ts-net", "kind":"remote", "label":"HOSTNAME"},
  "operator_declaration": {"name": "human name", "signed_at": "...Z",
     "statement": "I accept the bound operating map and this crew for mission-buildout only"},
@@ -66,9 +66,13 @@ If installed Hermes config/skills are symbolic links, this predicate rejects
 them rather than guessing what a mutable external target means.
 
 The root profile.yaml Desktop ui_meta registry must contain both listed native
-name: rooms with roomId absent or null, active revisions (not tombstoned), and all six
-profiles as members with the operator-attested exact connection id/kind/label
-and no known source-missing or source-unreachable flag. A remote connection
+rooms: current id:<client_room_id> keys require roomId exactly equal to the
+nonempty key suffix; legacy name:<Display Name> keys require roomId absent or
+null and a matching name. Both need active revisions (id tombstones are final;
+legacy name tombstones are revision-gated) and all six profiles as members with
+the operator-attested exact connection id/kind/label and no known source-missing
+or source-unreachable flag. A hosted groups.send/engine-only room does not meet
+this root ui_meta requirement. A remote connection
 id must start with the bound control.env TAILSCALE_HOSTNAME and end -ts-net.
 The coordination room's saved log must contain the witnessed user post and
 named member-profile reply with exact ids/text, source, common thread, and
@@ -370,20 +374,28 @@ def _registry(data: bytes, roles: dict[str, str], rooms: dict, witness: dict,
     deleted = groups.get("deleted", {})
     _need(isinstance(deleted, dict), "invalid_room_registry")
     for room_key in rooms.values():
-        _need(isinstance(room_key, str) and room_key.startswith("name:")
-              and len(room_key) > 5 and room_key in saved, "invalid_room_registry")
+        _need(isinstance(room_key, str) and room_key in saved, "invalid_room_registry")
         room = saved[room_key]
-        # Tombstones at or newer than the room revision hide the saved room.
         revision = room.get("revision") if isinstance(room, dict) else None
-        tombstone = deleted.get(room_key)
-        _need(type(revision) is int and revision >= 0 and
-              (tombstone is None or type(tombstone) is int and tombstone < revision),
-              "invalid_room_registry")
-        # Native Desktop-only name: rooms normally omit roomId entirely;
-        # explicit null is also an unbound client room. An engine id is not.
-        _need(isinstance(room, dict) and room.get("roomId") is None
-              and room.get("name") == room_key[5:] and isinstance(room.get("members"), list),
-              "invalid_room_registry")
+        _need(type(revision) is int and revision >= 0, "invalid_room_registry")
+        if room_key.startswith("id:"):
+            # Current Desktop mints a client roomId and keys the saved projection
+            # by that exact id. Its tombstone is final, even if a stale saved
+            # room has a higher revision. A hosted engine-only room is never
+            # found in this root ui_meta registry.
+            _need(len(room_key) > 3 and room_key not in deleted
+                  and room.get("roomId") == room_key[3:]
+                  and isinstance(room.get("name"), str) and bool(room["name"].strip()),
+                  "invalid_room_registry")
+        else:
+            # Legacy Desktop rooms omit roomId or use null. Only these name:
+            # keys use revision-gated tombstones.
+            tombstone = deleted.get(room_key)
+            _need(room_key.startswith("name:") and len(room_key) > 5
+                  and (tombstone is None or type(tombstone) is int and tombstone < revision)
+                  and room.get("roomId") is None and room.get("name") == room_key[5:],
+                  "invalid_room_registry")
+        _need(isinstance(room.get("members"), list), "invalid_room_registry")
         members = room["members"]
         _need(len(members) == 6 and
               {m.get("name") for m in members if isinstance(m, dict)} == set(roles.values())
@@ -472,7 +484,9 @@ def _accepted(root: int, instance: str, scope: str, now: datetime) -> None:
     _need(len(set(roles.values())) == 6, "invalid_roster")
     _roster(root, roles)
     rooms = _keys(receipt["rooms"], {"coordination", "retrospective"}, "invalid_room_registry")
-    _need(all(isinstance(v, str) and v.startswith("name:") and len(v) > 5
+    _need(all(isinstance(v, str) and
+              ((v.startswith("name:") and len(v) > 5) or
+               (v.startswith("id:") and bool(v[3:].strip())))
               for v in rooms.values()) and len(set(rooms.values())) == 2,
           "invalid_room_registry")
     connection = _keys(receipt["member_connection"],

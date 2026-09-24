@@ -113,6 +113,32 @@ class FormationAdmissionTests(unittest.TestCase):
         self.publish()
         self.valid_data = copy.deepcopy(self.data)
 
+    def use_client_id_rooms(self, kinds=("coordination", "retrospective")):
+        """Bind current Desktop client room IDs in receipt, cycle and root ui_meta."""
+        new_rooms = dict(self.data["rooms"])
+        saved = self.registry["ui_meta"]["hermes-bots-groups"]["rooms"]
+        for kind in kinds:
+            old_key = new_rooms[kind]
+            client_id = f"client-{kind}-uuid"
+            new_key = f"id:{client_id}"
+            saved[new_key] = saved.pop(old_key)
+            saved[new_key]["roomId"] = client_id
+            new_rooms[kind] = new_key
+        self.data["rooms"] = new_rooms
+        self.data["human_client_witness"]["room_keys"] = list(new_rooms.values())
+        cycle = self.home / "formation/cycle.json"
+        cycle_data = json.loads(cycle.read_text())
+        cycle_data["rooms"] = new_rooms
+        cycle.write_text(json.dumps(cycle_data))
+        self.data["evidence"]["cycle"] = self.ref("hermes-data/formation/cycle.json")
+        self.save_registry()
+
+    def save_registry(self):
+        profile = self.home / "profile.yaml"
+        profile.write_text(yaml.safe_dump(self.registry, sort_keys=False))
+        self.data["bindings"]["default.profile"] = self.ref("hermes-data/profile.yaml")
+        self.publish()
+
     def put(self, relative, content, *, private=False):
         path = self.instance / relative
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -432,6 +458,115 @@ class FormationAdmissionTests(unittest.TestCase):
                 target.write_bytes(original)
                 self.data = copy.deepcopy(self.valid_data)
                 self.publish()
+
+    def test_current_client_id_rooms_and_mixed_legacy_room_accept_as_attested_snapshot(self):
+        self.decision(0)  # Legacy name:/roomId:null-or-omitted baseline.
+        self.use_client_id_rooms(("coordination",))
+        self.assertEqual(self.data["human_client_witness"]["room_keys"],
+                         ["id:client-coordination-uuid", ROOMS["retrospective"]])
+        report = self.decision(0)
+        self.assertTrue(report["operator_attested"])
+        self.assertFalse(report["live_client_verified"])
+        self.use_client_id_rooms(("retrospective",))
+        self.assertEqual(self.data["human_client_witness"]["room_keys"],
+                         ["id:client-coordination-uuid", "id:client-retrospective-uuid"])
+        self.decision(0)
+
+    def test_client_id_requires_matching_projection_room_id_and_final_tombstones(self):
+        self.use_client_id_rooms()
+        self.decision(0)
+        groups = self.registry["ui_meta"]["hermes-bots-groups"]
+        for kind in ("coordination", "retrospective"):
+            key = self.data["rooms"][kind]
+            for wrong_id in ("some-other-client-room", None, ""):
+                with self.subTest(kind=kind, wrong_id=wrong_id):
+                    groups["rooms"][key]["roomId"] = wrong_id
+                    self.save_registry()
+                    self.assertEqual(self.decision()["reason"], "invalid_room_registry")
+            groups["rooms"][key]["roomId"] = key[3:]
+            for tombstone in (0, 3, 4):
+                with self.subTest(kind=kind, tombstone=tombstone):
+                    # Unlike legacy name keys, even a stale id tombstone is final.
+                    groups["deleted"] = {key: tombstone}
+                    self.save_registry()
+                    self.assertEqual(self.decision()["reason"], "invalid_room_registry")
+            groups.pop("deleted")
+            self.save_registry()
+            self.decision(0)
+            saved_room = groups["rooms"].pop(key)
+            self.save_registry()
+            # An engine-only room and groups.send ACK cannot fill a missing
+            # root ui_meta projection; admission reads the bound registry.
+            self.assertEqual(self.decision()["reason"], "invalid_room_registry")
+            groups["rooms"][key] = saved_room
+            self.save_registry()
+            self.decision(0)
+
+    def test_client_id_witness_requires_bounded_log_entry_not_engine_ack(self):
+        self.use_client_id_rooms()
+        groups = self.registry["ui_meta"]["hermes-bots-groups"]
+        key = self.data["rooms"]["coordination"]
+        groups["rooms"][key]["log"][1]["id"] = "hosted-groups-send-ack"
+        self.save_registry()
+        self.assertEqual(self.decision()["reason"], "invalid_witness")
+        groups["rooms"][key]["log"][1]["id"] = "reply-18"
+        self.save_registry()
+        self.decision(0)
+
+    def test_client_id_receipt_rejects_empty_and_nonexact_keys(self):
+        self.use_client_id_rooms()
+        correct = copy.deepcopy(self.data)
+        for invalid in ("id:", "id: ", "id:wrong-client-id", "name:Coordination"):
+            with self.subTest(invalid=invalid):
+                self.data = copy.deepcopy(correct)
+                self.data["rooms"]["coordination"] = invalid
+                self.data["human_client_witness"]["room_keys"] = list(self.data["rooms"].values())
+                cycle = self.home / "formation/cycle.json"
+                cycle_data = json.loads(cycle.read_text())
+                cycle_data["rooms"] = self.data["rooms"]
+                cycle.write_text(json.dumps(cycle_data))
+                self.data["evidence"]["cycle"] = self.ref("hermes-data/formation/cycle.json")
+                self.publish()
+                self.assertEqual(self.decision()["reason"], "invalid_room_registry")
+
+    def test_client_id_witness_cycle_and_six_source_roster_fail_closed(self):
+        self.use_client_id_rooms()
+        self.decision(0)
+        correct = copy.deepcopy(self.data)
+        key = self.data["rooms"]["coordination"]
+        for kind in ("coordination", "retrospective"):
+            with self.subTest(kind=kind):
+                self.data = copy.deepcopy(correct)
+                self.data["human_client_witness"]["room_keys"] = [
+                    ROOMS[k] if k == kind else self.data["rooms"][k]
+                    for k in ("coordination", "retrospective")]
+                self.publish()
+                self.assertEqual(self.decision()["reason"], "invalid_witness")
+                self.data = copy.deepcopy(correct)
+                self.data["rooms"][kind] = "id:other-client-room"
+                self.publish()
+                self.assertEqual(self.decision()["reason"], "invalid_witness")
+                self.data["human_client_witness"]["room_keys"] = list(self.data["rooms"].values())
+                self.publish()
+                self.assertEqual(self.decision()["reason"], "invalid_evidence")
+        self.data = copy.deepcopy(correct)
+        self.publish()
+        self.decision(0)
+        groups = self.registry["ui_meta"]["hermes-bots-groups"]
+        for change in (
+                lambda d: d["members"].pop(),
+                lambda d: d["members"][0].update(name="other"),
+                lambda d: d["members"][0].update(connectionId="hosted-engine-source"),
+                lambda d: d["members"][0].update(sourceMissing=True),
+                lambda d: d["members"][0].update(sourceReachable=False)):
+            with self.subTest(change=change):
+                original = copy.deepcopy(groups["rooms"][key])
+                change(groups["rooms"][key])
+                self.save_registry()
+                self.assertEqual(self.decision()["reason"], "invalid_room_registry")
+                groups["rooms"][key] = original
+        self.save_registry()
+        self.decision(0)
 
     def test_native_markdown_map_unbound_name_rooms_and_shared_skills(self):
         # BTT's real operating map has this prose-header shape. A synthetic

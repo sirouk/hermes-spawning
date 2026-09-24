@@ -27,16 +27,20 @@ Source of truth: `apps/desktop/src/plugins/hermes-bots/` — `group-chat.ts`
 
 ## Room keys and entry shape
 
-Rooms are keyed `name:<Display Name>` (Desktop-native) or `id:<roomId>`.
-**`roomId: null` is the normal, healthy shape for a Desktop room** — it means
-pure client-side, no engine binding. A room you create bound to an engine
-`roomId` is the one that will never render. Do not "repair" a null `roomId`.
+Current Desktop's `create-dialog.tsx` mints a fresh client `roomId` with
+`mintGroupRoomId()`; `group-chat.ts` keys its `ui_meta` projection as
+`id:<client_room_id>` and merges that projection into client rooms on pull.
+An `id:` key or non-null `roomId` is **not** proof of a hosted-engine binding.
+Legacy `name:<Display Name>` rooms with `roomId: null` remain valid and may
+be active. Do not "repair" a null ID by replacing it with a hosted-engine ID
+or its log. `groups.send` posts to the separate hosted engine and does not
+render its transcript in Desktop, whatever the projection's key.
 
 Log entry (exact — `group-chat.ts appendGroupChatEntry`):
 
 ```json
 { "id": "<uuid4>", "from": {"kind": "user", "name": "You"},
-  "text": "...", "at": 1790061204281, "thread": "tm<base36ms>-<rand5>" }
+  "text": "...", "at": 1790061204281, "thread": "t<base36ms>-<rand5>" }
 ```
 
 Member entries use `{"kind":"member","name":"<profile>","source":"<label>"}`.

@@ -88,18 +88,21 @@ class RoomRegistryTests(unittest.TestCase):
             self.assertEqual(out, "")
             self.assertIn("--apply is disabled", err)
 
-    def test_id_room_is_saved_projection_not_proof_hosted_posts_render(self):
+    def test_client_minted_id_room_check_needed_is_not_proof_of_engine_binding(self):
         doc = self.original_doc.copy()
         doc["ui_meta"] = {"hermes-bots-groups": {
-            "rooms": {"id:engine-room": room(room_id="engine-room", log=[])},
+            "rooms": {"id:rmw123-abc12": room(room_id="rmw123-abc12")},
             "deleted": {"name:Closed": 4}, "version": 12,
         }}
         self.write(doc)
         status, out, err = self.run_main("--verify")
+        # The read-only checker still requires a name:/null room. Its warning
+        # is inconclusive: current Desktop creates ID-keyed client rooms.
         self.assertEqual(status, 1, (out, err))
+        self.assertIn("id:rmw123-abc12", out)
+        self.assertIn("stored_log_entries=1", out)
         self.assertIn("ID-keyed projection", out)
         self.assertIn("hosted-engine posts do not render in Desktop", out)
-        self.assertIn("no name:/roomId:null Desktop-native room", out)
         self.assertIn("not live-client visibility", out)
 
     def test_revision_gated_tombstone_replay_preserves_source(self):
@@ -155,6 +158,25 @@ class NoDestructiveRoomDocsTests(unittest.TestCase):
             self.assertIn("roomId: null", doc)
             self.assertNotIn("Create `rooms['id:<engineRoomId>']`", doc)
         self.assertIn("Do not use that recipe", duplicate)
+
+    def test_docs_distinguish_client_id_rooms_from_hosted_engine_rooms(self):
+        paths = (
+            "hermes-bot-roster-and-rooms/SKILL.md",
+            "hermes-bot-roster-and-rooms/references/room-registry-surgery.md",
+            "hermes-group-chat-delivery/SKILL.md",
+            "hermes-group-chat-delivery/references/desktop-ui-meta-delivery.md",
+            "hermes-group-chat-delivery/references/room-registry-surgery.md",
+        )
+        for relative in paths:
+            with self.subTest(document=relative):
+                doc = (ROOT / "skills" / relative).read_text()
+                self.assertIn("id:<client_room_id>", doc)
+                self.assertIn("ui_meta", doc)
+                self.assertIn("legacy", doc.lower())
+                self.assertIn("hosted", doc)
+        delivery = (ROOT / "skills/hermes-group-chat-delivery/SKILL.md").read_text()
+        self.assertNotIn("*and are the ones that render*", delivery)
+        self.assertNotIn("signature of the\nsurface that renders", delivery)
 
     def test_desktop_reference_keeps_readback_separate_from_visibility(self):
         reference = (ROOT / "skills/hermes-group-chat-delivery/references/desktop-ui-meta-delivery.md").read_text()

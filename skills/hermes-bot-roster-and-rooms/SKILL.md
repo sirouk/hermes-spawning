@@ -1,7 +1,7 @@
 ---
 name: hermes-bot-roster-and-rooms
 description: Diagnose the Desktop bot list and Group Chat room projection without replacing Desktop-native rooms.
-version: 0.3.0
+version: 0.3.1
 author: Hermes
 license: MIT
 platforms: [linux]
@@ -115,19 +115,24 @@ Registry keys in `profile.yaml`: `ui_meta['hermes-bots-groups']` =
 ## Procedure 2 — inspect Desktop rooms without editing them
 
 Read `references/room-registry-surgery.md` before considering any room change.
-A `name:<Display>` key with `roomId: null` is normal and healthy; it must not
-be replaced by an engine ID. Tombstones are revision-gated, and a stale
-Desktop client can be a competing writer.
+Current Desktop creates rooms with a client-minted `roomId` and projects them
+under `id:<client_room_id>`; the client can render these via `ui_meta`. A
+`name:<Display>` key with `roomId: null` is also a valid, potentially active
+legacy Desktop room; do not replace it with a hosted-engine ID. Tombstones
+for `name:` keys are revision-gated, and a stale Desktop client can be a
+competing writer.
 
 1. Read the active profile’s `profile.yaml`; record room keys, revision,
    `roomId`, members, log lengths, and existing tombstones. Run
    `scripts/rebuild_room_registry.py --profile-yaml <path> --verify` to replay
    the reducer on a copy, not to rebuild. Optionally pass `--personas` for
    an exact expected-members check. The default mode is equally read-only.
-2. Distinguish the hosted engine from Desktop. Hosted logs and engine room IDs
-   do **not** make Desktop posts visible. The script refuses `--engine`. On
-   record, a previous conversion to `id:<roomId>` left empty Desktop rooms
-   while an untouched `name:`/null room was the one the operator used.
+2. Distinguish the hosted engine from Desktop. Hosted logs and `groups.send`
+   do **not** make Desktop posts visible. The script refuses `--engine`.
+   An `id:` key alone does not identify a hosted-engine binding: current
+   Desktop creates `id:<client_room_id>` rooms. On record, a previous
+   conversion of a `name:`/null room to a **hosted-engine ID** left empty
+   Desktop rooms while the untouched room was the one the operator used.
 3. Never automate conversion, deletion, tombstone rewrites, log clearing, or
    member replacement based on this check. The script refuses `--apply` even
    with `--verify`. If the operator requests a specific change, first obtain
@@ -230,11 +235,12 @@ states.
 ```
 
 Replays tombstones over a copy and prints the saved projection. A healthy
-`name:`/null room passes; hosted-engine rooms are neither read nor required.
-If only `id:` rooms survive, the check reports that no Desktop-native room is
-established; this does not prove that an ID-keyed projection itself is absent
-from the client's sidebar. If `--personas` is set, a member mismatch fails
-the check. `--apply` and
-`--engine` fail closed without writing. Pair it with `hermes profile list` for
-the bot rows, then ask the operator to confirm the room in Desktop; this
-script cannot attest to the currently displayed client view.
+legacy `name:`/null room passes; hosted-engine rooms are neither read nor
+required. **Caveat:** the read-only script still reports `CHECK NEEDED` when
+only `id:` keys survive, even though current Desktop creates valid
+`id:<client_room_id>` rooms. Treat that result as a request for client
+confirmation, not proof the room is broken or engine-bound. If `--personas`
+is set, a member mismatch fails the check. `--apply` and `--engine` fail
+closed without writing. Pair it with `hermes profile list` for the bot rows,
+then ask the operator to confirm the room in Desktop; this script cannot
+attest to the currently displayed client view.

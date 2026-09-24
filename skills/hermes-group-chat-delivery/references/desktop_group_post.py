@@ -2,6 +2,8 @@
 
 VERIFIED WORKING against Hermes 0.21.4 (desktop source v2026.9.14). A post
 written by this module plus a member reply it drove both rendered in Desktop.
+Current Desktop sources mint `t<base36ms>-<rand5>` thread IDs; live client
+visibility must still be witnessed rather than inferred from a backend ACK.
 
 Reverse-engineered from apps/desktop/src/plugins/hermes-bots:
   group-rounds.ts  sendToGroupChat()  -> appends a user entry, then drives
@@ -74,8 +76,14 @@ def _relabel(text: str) -> str:
 
 
 def mint_thread_id() -> str:
-    """group-chat.ts mintGroupThreadId(): 'tm' + base36 time + '-' + rand."""
-    return f"tm{int(time.time() * 1000):x}-{uuid.uuid4().hex[:5]}"
+    """Current Desktop mintGroupThreadId(): 't' + base36 milliseconds + random suffix."""
+    millis = int(time.time() * 1000)
+    digits = "0123456789abcdefghijklmnopqrstuvwxyz"
+    encoded = ""
+    while millis:
+        millis, digit = divmod(millis, 36)
+        encoded = digits[digit] + encoded
+    return f"t{encoded or '0'}-{uuid.uuid4().hex[:5]}"
 
 
 def now_ms() -> int:

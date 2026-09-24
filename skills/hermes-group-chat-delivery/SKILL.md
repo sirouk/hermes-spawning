@@ -1,7 +1,7 @@
 ---
 name: hermes-group-chat-delivery
 description: "Deliver a post into a Hermes Desktop Group Chat room, scheduled or live, with honest backend-versus-Desktop visibility checks."
-version: 3.2.0
+version: 3.2.1
 author: Hermes Agent
 license: MIT
 platforms: [linux]
@@ -33,8 +33,8 @@ hours and produces a perfect-looking delivery nobody can see.
 | Written by | `profiles.configure` -> `ui_meta` | `groups.send` RPC -> room driver |
 | Stored in | `profile.yaml` -> `ui_meta['hermes-bots-groups']` | `hosted_room_events` in shared state DB |
 | Member turns | `prompt.submit` per profile, `source='tui'` | driver tasks, `source='bot_room'` |
-| Room key | `name:<Display Name>` (or `id:<roomId>`) | `room_id` |
-| `roomId` | **`null` is normal and healthy** | always set |
+| Room key | `id:<client_room_id>` on current Desktop; legacy `name:<Display Name>` with null ID also valid | `room_id` |
+| `roomId` | Client-minted ID on new rooms; `null` on valid legacy rooms; neither implies an engine binding | always set |
 | Renders in Desktop | **YES** | **NO** |
 
 **The Desktop plugin contains zero references to `groups.send`, `groups.log`,
@@ -46,14 +46,19 @@ grep -rn "groups\.send\|groups\.log\|groups\.state" apps/desktop/src/plugins/her
 ```
 
 So a `groups.send` can return a clean ACK, allocate a seq, drive real member
-turns, settle correctly — and be **invisible**, forever. On-record failure:
-an engine-bound room pair (`id:*`, `roomId` set) sat at 0 rendered messages
-while the room the operator actually watched was a `name:`-keyed room with
-`roomId: null` in the same registry.
+turns, settle correctly — and be **invisible** to Desktop. Current Desktop's
+`create-dialog.tsx` calls `mintGroupRoomId()` for a new room; `group-chat.ts`
+projects it as `id:<client_room_id>` and merges that `ui_meta` room into the
+client on pull. **An `id:` key and a non-null `roomId` do not by themselves
+mean a hosted-engine binding.** On-record failure: a room converted to an
+**engine ID** sat at 0 rendered messages while the room the operator watched
+was a `name:`-keyed, `roomId: null` room in the same registry.
 
-**`roomId: null` is not a defect to repair — it is the signature of the
-surface that renders.** Binding a room to an engine `roomId` is what makes it
-invisible. Do not "fix" it, and do not trust tooling that matches on `roomId`.
+**`roomId: null` is not a defect to repair.** Valid legacy `name:`/null rooms
+can still render, just as current client-ID rooms can. Do not "fix" a null
+room by binding it to a hosted-engine ID. Match the exact `ui_meta` room key
+and check the actual client view; do not trust a lookup that assumes all
+non-null IDs are hosted-engine bindings or all null IDs are broken.
 
 **If the goal is "the human sees it in Desktop": use the Desktop path.**
 Full formula, RPCs, entry schema, timer viability, and a verified-working
@@ -479,9 +484,11 @@ HERMES_HOME=/opt/data/profiles/<profile> python -c \
 - **Do not "fix" hidden room sessions.** Room dispatch creates every room
   session `hidden=1` by design; unhiding them is not a fix and breaks the
   registry's assumptions.
-- **Do not trust discovery tools that match on `roomId`** the Desktop roster
-  may not carry (`roomId: null`) — they report a fully populated room as
-  empty. Trust `groups.state`/live rosters over name/ID string matching.
+- **Do not trust discovery tools that match only on `roomId`.** A valid
+  legacy Desktop room can carry `roomId: null`, while a current Desktop room
+  carries a client-minted ID unrelated to `hosted_rooms`. Match the exact
+  `ui_meta` key and inspect the client for Desktop delivery. Use
+  `groups.state`/live rosters only for the separate hosted-engine path.
 - **Verify a user-reported room closure before writing anywhere.** When the
   user says "I closed those rooms", re-read the projection and check that
   `rooms`/`deleted`/the CAS revision actually changed.
@@ -521,8 +528,9 @@ HERMES_HOME=/opt/data/profiles/<profile> python -c \
    with the one-line grep in the surfaces section above. The Desktop sidebar
    list is built from `ui_meta['hermes-bots-groups']` in `profile.yaml`,
    **not** from the engine's `hosted_rooms` table — purging `hosted_rooms`
-   leaves the sidebar unchanged, and entries with `roomId: null` are bound to
-   no engine room at all *and are the ones that render*.
+   leaves the sidebar unchanged. Both current `id:<client_room_id>` rooms
+   and valid legacy `name:`/null rooms can render from `ui_meta`; the key
+   does not prove a hosted-engine binding.
    Diagnose roster and Desktop registry state read-only with the sibling
    `hermes-bot-roster-and-rooms` skill. Its registry-surgery procedure is
    disabled; do not nuke, recreate, or mutate rooms as a diagnostic step.
