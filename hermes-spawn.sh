@@ -77,7 +77,12 @@ Interactive commands (chat, shell, logs, setup, config, reauth) refuse 'all'.
 
 Fleet skills live in skills/ (each is a directory with a SKILL.md). Spawn
 installs them into hermes-data/fleet-skills/ automatically; install-skills pushes
-them to an existing instance and is safe to re-run. See the README.
+them to an existing instance and is safe to re-run. Spawn does not know a
+future Desktop connection id and must not derive one from the Tailnet hostname.
+After Desktop seats each group room, use `fleet-doctor INSTANCE
+--verified-connection-id ID --require-room-connection ROOM_KEY=ID` to check
+saved remote seats. Then verify the Desktop filter and a real member reply:
+this read-only command is not a native execution guard. See the README.
 USAGE
 }
 

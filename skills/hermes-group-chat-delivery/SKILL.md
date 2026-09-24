@@ -72,10 +72,16 @@ in `profiles/<profile>/state.db`) — a private 1:1, never a room.
 
 Before wiring anything, **measure the real room live**: read
 `ui_meta['hermes-bots-groups']['rooms']` in `profile.yaml`; record the room
-key, `revision`, `len(log)`, and member roster. Never act on a stale
-snapshot — capacity/activity decisions made from an old revision have been
-wrong before. Re-measure `revision` and log length before re-raising any
-policy question (archival, capacity).
+key, `revision`, `len(log)`, and member roster. For a Desktop room, verify
+every saved member's `connectionId` against the operator's affected Desktop
+connection registry; the gateway hostname, URL and current connection label
+are not the ID. A room with `local` seats cannot pass a remote gateway filter;
+a guessed ID creates unreachable ghosts. Use
+`hermes-bot-roster-and-rooms` and its read-only `--require-room-connection`
+check before scheduling delivery. A server PASS is not a member turn or human
+Desktop view. Never act on a stale snapshot — capacity/activity decisions
+made from an old revision have been wrong before. Re-measure `revision` and
+log length before re-raising any policy question (archival, capacity).
 
 ## Delivery contract (how a message reaches the room)
 

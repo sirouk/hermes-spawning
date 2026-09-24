@@ -74,6 +74,11 @@ scorers, models, tests, scripts, tools, or research publications; labels such as
 "read-only", "preparatory", or "unaffected" do not exempt mission work.
 Connector authentication for a role is formation; publication through it is
 mission work. An explicit operator exception must name its scope and authority.
+For Desktop rooms, the seat `connectionId` is owned by the operator's Desktop
+registry, **not** by the spawned host, Tailscale name or profile label. Before
+creating or seating either all-hands room, obtain its actual Desktop source id
+or have Desktop's Manage members picker seat live roster rows; never synthesize
+the id from a hostname.
 The steward equips and repairs roles, not their mission deliverables. A blocked
 room, worker, or continuation path leaves the crew FORMING, however many
 profiles and boards exist. Advance other formation work and escalate only a
@@ -88,7 +93,13 @@ its role; failure visibility, a stop, and continuation/recovery. Keep schedules
 paused until preflight passes, then run only bounded formation checks. Use the
 real room path: `conditional_send` gates hosted `groups.send`, not Desktop
 `ui_meta`. Backend readback does not prove Desktop rendering; verify with the
-client or mark visibility unknown. Test handoff directories when file-first
+client or mark visibility unknown. Before qualification, use the read-only,
+fail-closed `lib/fleet_doctor.py --verified-connection-id ID
+--require-room-connection ROOM_KEY=ID` check on each target gateway and verify
+all seats against the operator's actual Desktop source; this is a projection
+check, not a native action guard. Have the operator confirm both rooms under
+the intended gateway filter and witness an attributed member reply. Test
+handoff directories when file-first
 handoffs are chosen, not by default. An independent assessor verifies the
 evidence; only the operator or the acceptance authority designated in the
 operator-approved contract may approve the stage. Passing formation admits
@@ -195,6 +206,22 @@ Run two all-hands Group Chat rooms: one for recon, deliberation, and execution
 coordination; one for retrospective and collective self-improvement. Mirror them
 with two Kanban boards. Meetings produce decisions, useful challenges, or
 improvements -- never compulsory chatter.
+
+**Room-seat qualification (both rooms, every fleet):** Read
+`hermes-bot-roster-and-rooms` and its registry-surgery reference before any
+server-side seat write. Confirm the intended *Desktop* rooms, keys and current
+operator-client roster. A remote gateway's ID is client-owned; a guessed or
+`local` seat can leave a room visible under Any but hidden by the remote gateway
+filter while duplicate ghost members fill the six-seat picker. Back up the
+client and every gateway projection before any repair; do not recreate rooms,
+wipe a container, change logs, or generate IDs from gateway names. If removal
+of known-bad seats is necessary, use a narrow authenticated CAS change that
+preserves room keys, posts, tombstones and unrelated rooms, then reseat from
+Desktop's live picker. Compare fresh revisions on *all* projections; a tie
+unions stale seats and a lower revision loses. Read back each projection, then
+ask the operator to verify both rooms under the correct filter and test a real
+member reply. If any room disappears from a gateway projection later, fail
+the gate and investigate; a one-time PASS was not stable evidence.
 
 Independence first: each persona prepares its current-state assessment
 **before** seeing peers.

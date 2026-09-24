@@ -76,6 +76,11 @@ local state. They are not copied or exposed as the shared fleet collection.
 
 `spawn` installs the fleet skills into the new instance automatically, so a
 fresh spawn starts with the same capabilities as the rest of the fleet.
+Spawning cannot discover the future Desktop client's connection ID: after
+adding a gateway in Desktop, seat rooms from its live member picker or read
+the operator's exact registry ID, then run the room-seat doctor check below
+and confirm client rendering plus a member reply. A hostname-shaped ID is
+not evidence, and `spawn`/`install-skills` do not create or qualify rooms.
 `install-skills` is idempotent (unchanged skills are skipped). The repo is
 canonical for named shared skills; per-instance edits to those same names must
 be kept in a separate local skill directory or archived before replacement.
