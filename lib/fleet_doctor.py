@@ -178,6 +178,19 @@ def _job_checks(checks: list[dict], instance: str, profile: str, root: Path,
              job_id=job_id)
 
 
+DESKTOP_SYNC_LIMIT = 48_000  # group-chat.ts GROUP_CHAT_SYNC_MAX_BYTES.
+# Warn with headroom for a new 6-seat room and a single post. This is advisory,
+# not a proof that Desktop will drop a specific room on its next sync.
+DESKTOP_SYNC_MIN_HEADROOM = 4_000
+
+
+def _desktop_gateway_size(value: Any) -> int:
+    """groupChatGatewayJsonSize: JSON byte count plus separator/Unicode reserve."""
+    compact = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    return sum(1 + (char in ",:") if ord(char) <= 0x7f else
+               6 if ord(char) <= 0xffff else 12 for char in compact)
+
+
 def _member_ids(room: Any) -> list[str]:
     """Remote member connection ids saved in one ui_meta room, in order."""
     members = room.get("members") if isinstance(room, dict) else None
@@ -211,6 +224,20 @@ def _room_check(checks: list[dict], instance: str, profile: str, home: Path,
     count = len(rooms) if isinstance(rooms, dict) else 0
     _row(checks, instance, profile, "desktop_registry", "UNVERIFIED",
          f"{count} Desktop ui_meta room(s) on disk; client sync, visibility, backend rooms, and delivery not verified")
+    if isinstance(registry, dict) and isinstance(rooms, dict):
+        # groupChatSyncEnvelope() can delete a whole room before CAS when even
+        # its final post will not fit; omission needs no tombstone.
+        used = _desktop_gateway_size(registry)
+        headroom = DESKTOP_SYNC_LIMIT - used
+        if headroom < DESKTOP_SYNC_MIN_HEADROOM:
+            _row(checks, instance, profile, "desktop_room_capacity", "WARN",
+                 f"Desktop gateway projection estimates {used}/{DESKTOP_SYNC_LIMIT} "
+                 f"bytes (headroom {headroom}); another room may be omitted without a tombstone. "
+                 "Back up client state; do not trim unrelated room logs or infer client deletion")
+        else:
+            _row(checks, instance, profile, "desktop_room_capacity", "PASS",
+                 f"Desktop gateway projection estimates {used}/{DESKTOP_SYNC_LIMIT} "
+                 f"bytes (headroom {headroom}); future growth and client visibility still unverified")
     # Connection identity of saved room seats. A Desktop registry id is minted
     # from the connection LABEL the operator typed; it is NEVER derivable from
     # a gateway hostname, URL, or tailnet name, and a rename keeps the old id.

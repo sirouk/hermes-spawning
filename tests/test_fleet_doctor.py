@@ -273,6 +273,35 @@ class DoctorTests(unittest.TestCase):
         (home / "profile.yaml").write_text(
             (home / "profiles" / "alice" / "profile.yaml").read_text())
 
+    def test_gateway_room_capacity_warns_before_room_omission(self):
+        # Upstream Desktop counts punctuation twice and reserves six bytes for
+        # each BMP Unicode code point; a near-limit projection is not healthy.
+        home = self.instance / "hermes-data"
+        profile = home / "profile.yaml"
+        rooms = {"name:Existing": {"name": "Existing", "roomId": None,
+                                   "members": [], "revision": 9,
+                                   "log": [{"id": "m1", "text": "x" * 45_000}]}}
+        profile.write_text(yaml.safe_dump({"ui_meta": {"hermes-bots-groups": {
+            "version": 3, "updatedAt": 1, "rooms": rooms, "deleted": {}}}}))
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 0)  # advisory; current room still present
+        rows = findings(data, "desktop_room_capacity")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "WARN")
+        self.assertIn("omitted without a tombstone", rows[0]["detail"])
+        self.assertEqual(findings(data, "desktop_registry")[0]["status"], "UNVERIFIED")
+        rooms["name:Existing"]["log"][0]["text"] = "small"
+        profile.write_text(yaml.safe_dump({"ui_meta": {"hermes-bots-groups": {
+            "version": 3, "updatedAt": 1, "rooms": rooms, "deleted": {}}}}))
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 0)
+        self.assertEqual(findings(data, "desktop_room_capacity")[0]["status"], "PASS")
+
+    def test_gateway_size_matches_desktop_separator_and_unicode_reserve(self):
+        self.assertEqual(doctor._desktop_gateway_size({"a": "x"}), 10)
+        self.assertEqual(doctor._desktop_gateway_size({"a": "é"}), 15)
+        self.assertEqual(doctor._desktop_gateway_size({"a": "🎉"}), 21)
+
     def test_required_room_seats_need_exact_operator_supplied_identity(self):
         key = "id:room-1"
         required = [f"{key}=gw-real"]

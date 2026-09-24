@@ -16,7 +16,18 @@ metadata:
 Diagnose retired bots and Group Chat rooms without converting Desktop-native
 rooms to hosted-engine IDs. The read-only registry script never changes rooms.
 This skill distinguishes the profile roster, Desktop room projection, and
-hosted-room engine. It does NOT cover scheduled posting into a room (see
+hosted-room engine. **Check the shared projection's capacity before seating
+more rooms:** the upstream Desktop `groupChatSyncEnvelope()` uses a 48,000-byte
+`groupChatGatewayJsonSize()` limit. It trims posts to one per room, then removes
+images, then **omits a whole room** if the envelope is still too large; missing
+keys have no tombstones. `lib/fleet_doctor.py` reports `desktop_room_capacity`
+WARN below 4,000 bytes of headroom (an advisory threshold, not a proof of a
+specific future drop). A previous room write may read back once and then vanish
+on a later publish. Do not delete unrelated transcripts to make space or
+blindly repeat the write. Back up the Desktop owner state, identify the current
+room keys/logs and projection writers, and plan an upstream/owner-coordinated
+capacity fix before retrying. One gateway file is not the rich client store.
+It does NOT cover scheduled posting into a room (see
 `hermes-group-chat-delivery`) or fleet-wide config sweeps (see
 `hermes-agent-fleet-ops`).
 

@@ -64,6 +64,19 @@ new room revision to win over stale client copies, then check Desktop filter,
 all seats, and one member reply. A gateway readback alone is not client proof.
 **Never wipe a container to fix client-synced room members.**
 
+**Capacity gate before any server-side seat write:** the Desktop projection
+uses one shared 48,000-byte envelope for rooms across gateways. Its conservative
+`groupChatGatewayJsonSize` counts JSON separators twice and reserves more than
+UTF-8 for Unicode; simply measuring `len(json.dumps(...))` understates it.
+`groupChatSyncEnvelope` trims older messages and images, then silently omits
+whole rooms if they still do not fit, with **no deletion tombstone**. Run
+`lib/fleet_doctor.py` and inspect `desktop_room_capacity`; below 4,000 bytes
+of headroom is WARN, not proof of future delivery. A one-time CAS/readback is
+not durable under a later Desktop fan-out. Preserve unrelated room logs and
+seek a source-reviewed capacity/scope fix or owner-coordinated recovery, not a
+blind higher revision or a one-room rewrite. Back up the owner's full local
+room state first; server mirrors are compact and cannot replace it.
+
 A server-side reseat requires the operator-supplied exact id AND the merge
 rules below, because Desktop reconciles per room by revision
 (`group-chat.ts` `mergeRemoteGroupChatSnapshotIntoRooms`,
