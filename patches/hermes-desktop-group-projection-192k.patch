@@ -1,0 +1,189 @@
+diff --git a/apps/desktop/src/plugins/hermes-bots/group-chat.test.ts b/apps/desktop/src/plugins/hermes-bots/group-chat.test.ts
+index 71feaa6a58b..a2ad1fd09a0 100644
+--- a/apps/desktop/src/plugins/hermes-bots/group-chat.test.ts
++++ b/apps/desktop/src/plugins/hermes-bots/group-chat.test.ts
+@@ -479,7 +479,7 @@ describe('gateway mirror', () => {
+     expect(key).toBeDefined()
+     expect((rooms[key!].log as GroupMessage[])[0].text).toBe('What changed?')
+     expect((rooms[key!].members as { name: string }[]).map(member => member.name)).toEqual(['research', 'builder'])
+-    expect(room.chat.groupChatGatewayJsonSize(envelope)).toBeLessThanOrEqual(48000)
++    expect(room.chat.groupChatGatewayJsonSize(envelope)).toBeLessThanOrEqual(192000)
+   })
+ 
+   it('is size bounded and favors recent messages', async () => {
+@@ -498,12 +498,76 @@ describe('gateway mirror', () => {
+ 
+     const log = snapshot.rooms['name:Large'].log
+ 
+-    expect(chat.groupChatGatewayJsonSize(snapshot)).toBeLessThanOrEqual(48000)
++    expect(chat.groupChatGatewayJsonSize(snapshot)).toBeLessThanOrEqual(192000)
+     expect(log.length).toBeLessThanOrEqual(16)
+     expect(log.at(-1)?.text).toMatch(/^99:/)
+     expect(log.at(-1)?.text.length).toBeLessThanOrEqual(1200)
+   })
+ 
++  it('keeps multiple rooms beyond the former 48KB gateway envelope', async () => {
++    const { chat } = await loadRoom()
++
++    const large = (id: string, at: number) => ({
++      roomId: id,
++      members: Array.from({ length: 6 }, (_, index) => ({
++        name: `bot-${index}`, connectionId: 'fleet', connectionKind: 'remote'
++      })),
++      log: Array.from({ length: 16 }, (_, index) => ({
++        id: `${id}-${index}`, at: at + index,
++        from: { kind: 'member', name: `bot-${index % 6}` },
++        text: 'x'.repeat(1100)
++      }))
++    })
++
++    const snapshot = chat.groupChatSyncSnapshot({
++      First: large('first', 1), Second: large('second', 100), Third: large('third', 200)
++    } as unknown as Record<string, GroupChat>)
++
++    expect(Object.keys(snapshot.rooms).sort()).toEqual(['id:first', 'id:second', 'id:third'])
++    expect(chat.groupChatGatewayJsonSize(snapshot)).toBeGreaterThan(48000)
++    expect(chat.groupChatGatewayJsonSize(snapshot)).toBeLessThanOrEqual(192000)
++  })
++
++  it('bounds a crowded projection with many rooms and tombstones without deleting them', async () => {
++    const { chat } = await loadRoom()
++
++    const rooms = Object.fromEntries(Array.from({ length: 22 }, (_, index) => [
++      `Room ${index}`,
++      {
++        roomId: `room-${index}`,
++        log: Array.from({ length: 16 }, (_, entry) => ({
++          id: `${index}-${entry}`, at: index * 100 + entry,
++          from: { kind: 'member', name: 'bot' }, text: 'y'.repeat(1200)
++        }))
++      }
++    ]))
++
++    const deleted = Object.fromEntries(Array.from({ length: 64 }, (_, index) => [
++      `id:old-${index}`, index + 1
++    ]))
++
++    const snapshot = chat.groupChatSyncSnapshot(rooms as unknown as Record<string, GroupChat>, deleted)
++
++    expect(chat.groupChatGatewayJsonSize(snapshot)).toBeLessThanOrEqual(192000)
++    expect(Object.keys(snapshot.deleted || {})).toHaveLength(64)
++    expect(snapshot.rooms['id:room-21']).toBeDefined()
++    expect(Object.keys(snapshot.rooms).length).toBeLessThan(22)
++  })
++
++  it('accounts for Python escaping DEL characters before gateway publish', async () => {
++    const { chat } = await loadRoom()
++
++    const snapshot = chat.groupChatSyncSnapshot({
++      BinaryEdge: {
++        log: [{ at: 1, from: { kind: 'user', name: 'You' }, text: '\u007f'.repeat(1200) }]
++      }
++    } as unknown as Record<string, GroupChat>)
++
++    expect(snapshot.rooms['name:BinaryEdge']).toBeDefined()
++    expect(chat.groupChatGatewayJsonSize(snapshot)).toBeGreaterThan(7200)
++    expect(chat.groupChatGatewayJsonSize(snapshot)).toBeLessThanOrEqual(192000)
++  })
++
+   it('preserves threads and budgets escaped Unicode', async () => {
+     const { chat } = await loadRoom()
+ 
+@@ -518,7 +582,7 @@ describe('gateway mirror', () => {
+       }
+     } as unknown as Record<string, GroupChat>)
+ 
+-    expect(chat.groupChatGatewayJsonSize(snapshot)).toBeLessThanOrEqual(48000)
++    expect(chat.groupChatGatewayJsonSize(snapshot)).toBeLessThanOrEqual(192000)
+     expect(snapshot.rooms['name:Unicode'].log.at(-1)?.thread).toBe('thread-15')
+   })
+ 
+diff --git a/apps/desktop/src/plugins/hermes-bots/group-chat.ts b/apps/desktop/src/plugins/hermes-bots/group-chat.ts
+index 8acb8508b87..ce1ff2a2684 100644
+--- a/apps/desktop/src/plugins/hermes-bots/group-chat.ts
++++ b/apps/desktop/src/plugins/hermes-bots/group-chat.ts
+@@ -47,9 +47,10 @@ export const $groupNeedsYou = atom<Record<string, boolean>>({})
+ export const $groupClarify = atom<Record<string, GroupPrompt>>({})
+ 
+ const GROUP_CHAT_SYNC_META_KEY = 'hermes-bots-groups'
+-// Gateway ui_meta is capped after Python JSON serialization. Keep a healthy
+-// margin below that limit because Python escapes Unicode while JS does not.
+-const GROUP_CHAT_SYNC_MAX_BYTES = 48000
++// The gateway caps the full ui_meta payload at 256 KiB after Python JSON
++// serialization. Leave room for the key wrapper and future metadata; the
++// conservative estimator below accounts for Python's Unicode escaping.
++const GROUP_CHAT_SYNC_MAX_BYTES = 192000
+ const GROUP_CHAT_SYNC_MESSAGES = 16
+ const GROUP_CHAT_SYNC_TEXT_CHARS = 1200
+ const GROUP_CHAT_SYNC_IMAGE_CHARS = 24000
+@@ -102,7 +103,12 @@ export function groupChatGatewayJsonSize(value: unknown) {
+     // Non-null: string iteration yields whole code points, never an empty string.
+     const codePoint = character.codePointAt(0)!
+ 
+-    if (codePoint <= 0x7f) {
++    if (codePoint === 0x7f) {
++      // JS JSON.stringify emits DEL literally; Python json.dumps escapes it
++      // as a six-byte Unicode escape. Without this case even a bounded envelope
++      // could be rejected by the gateway's size check.
++      bytes += 6
++    } else if (codePoint <= 0x7f) {
+       bytes += 1
+ 
+       if (character === ',' || character === ':') {
+diff --git a/tests/tui_gateway/test_profiles_ui_meta_cas.py b/tests/tui_gateway/test_profiles_ui_meta_cas.py
+index 9e4736993fe..bf823cec420 100644
+--- a/tests/tui_gateway/test_profiles_ui_meta_cas.py
++++ b/tests/tui_gateway/test_profiles_ui_meta_cas.py
+@@ -111,3 +111,32 @@ def test_two_concurrent_writers_cannot_both_replace_the_same_revision(home):
+     loser = next(result for result in results if result["ui_meta"] is False)
+     assert loser["ui_meta_conflicts"]["shared-room"]["actual"] == 1
+     assert _default_profile()["ui_meta_revisions"]["shared-room"] == 1
++
++
++def test_ui_meta_accepts_extended_room_projection_and_rejects_oversize(home):
++    # The Desktop sync projection is bounded below this 256 KiB JSON cap.
++    large = {"hermes-bots-groups": {"rooms": {"name:Room": {"log": ["x" * 190_000]}}}}
++    assert len(json.dumps(large)) > 65_536
++    assert len(json.dumps(large)) < 262_144
++    accepted = _configure(large)
++    assert accepted["ui_meta"] is True
++    assert _default_profile()["ui_meta"]["hermes-bots-groups"] == large["hermes-bots-groups"]
++    revision = accepted["ui_meta_revisions"]["hermes-bots-groups"]
++    oversized = {"hermes-bots-groups": {"rooms": {"name:Room": {"log": ["x" * 263_000]}}}}
++    rejected = _configure(oversized, {"hermes-bots-groups": revision})
++    assert rejected["ui_meta"] is False
++    assert _default_profile()["ui_meta_revisions"]["hermes-bots-groups"] == revision
++    assert _default_profile()["ui_meta"]["hermes-bots-groups"] == large["hermes-bots-groups"]
++
++
++def test_ui_meta_gateway_cap_includes_key_wrapper_at_exact_boundary(home):
++    prefix = len(json.dumps({"hermes-bots-groups": {"log": [""]}}))
++    exact = {"hermes-bots-groups": {"log": ["x" * (262_144 - prefix)]}}
++    assert len(json.dumps(exact)) == 262_144
++    assert _configure(exact)["ui_meta"] is True
++    revision = _default_profile()["ui_meta_revisions"]["hermes-bots-groups"]
++
++    too_large = {"hermes-bots-groups": {"log": ["x" * (262_145 - prefix)]}}
++    assert len(json.dumps(too_large)) == 262_145
++    assert _configure(too_large, {"hermes-bots-groups": revision})["ui_meta"] is False
++    assert _default_profile()["ui_meta_revisions"]["hermes-bots-groups"] == revision
+diff --git a/tui_gateway/methods_profiles.py b/tui_gateway/methods_profiles.py
+index 78ba30a6378..05b24a56fee 100644
+--- a/tui_gateway/methods_profiles.py
++++ b/tui_gateway/methods_profiles.py
+@@ -463,13 +463,13 @@ def _(rid, params: dict) -> dict:
+ 
+ 
+ def _configure_ui_meta(profile_dir, params, applied) -> None:
+-    """Merge ``params["ui_meta"]`` key-wise into profile.yaml (None deletes). 64KB cap (rides
++    """Merge ``params["ui_meta"]`` key-wise into profile.yaml (None deletes). 256KB cap (rides
+     every roster paint). ``ui_meta_expected_revisions``: per-key CAS, any mismatch rejects the
+     whole write; revisions survive deletion so a stale client cannot recreate a removed key."""
+     applied["ui_meta"] = False
+     try:
+         incoming = params["ui_meta"]
+-        if len(json.dumps(incoming)) > 65536:
++        if len(json.dumps(incoming)) > 262144:
+             return
+         expected = params.get("ui_meta_expected_revisions")
+         if expected is not None and not isinstance(expected, dict):
