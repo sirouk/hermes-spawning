@@ -46,7 +46,7 @@ Usage:
   ./hermes-spawn.sh info [instance]       Show the collected host snapshot
   ./hermes-spawn.sh host-preflight        Check host requirements only
   ./hermes-spawn.sh preflight instance [--json]  Read-only fleet readiness check
-  ./hermes-spawn.sh fleet-doctor instance|all [--json] [--policy-file PATH]
+  ./hermes-spawn.sh fleet-doctor instance|all [--json]
                                      Read-only disk audit; exit 1 on proven blockers
   ./hermes-spawn.sh formation-status instance|all
                                      Read-only formation status; never claims qualification
@@ -565,6 +565,14 @@ configure_dashboard_access() {
 # Publish a complete generation at /opt/data/fleet-skills. Never remove or
 # overwrite a live skill: running readers may have open handles into it.
 # An existing generation is kept outside the discovered fleet-skills tree.
+sync_fleet_soul_core() {
+  python3 -B "$SCRIPT_DIR/lib/sync_soul_core.py" \
+    --instance-dir "$INSTANCE_DIR" \
+    --seed "$SCRIPT_DIR/skills/fleet-organism-design/references/fleet-seed.md" \
+    --apply \
+    || die "Canonical Fleet Seed SOUL inheritance failed."
+}
+
 seed_fleet_skills() {
   [[ -d "$SKILLS_DIR" ]] || { info "No fleet skills directory ($SKILLS_DIR); skipping."; return 0; }
   local src name dest target_dir stage history unsafe_entry installed=0 updated=0 skipped=0
@@ -605,6 +613,9 @@ seed_fleet_skills() {
     fi
   done
   if (( installed == 0 && updated == 0 )); then
+    # Skill parity does not prove persona SOUL parity. Repair drift even when
+    # the shared skill generation itself is already current.
+    sync_fleet_soul_core
     info "Fleet skills: $installed installed, $updated refreshed, $skipped unchanged -> $target_dir"
     return 0
   fi
@@ -725,6 +736,7 @@ PY
     [[ ! -e "$history/${stage##*/}" && ! -L "$history/${stage##*/}" ]] || die "Fleet skills history entry already exists; old generation remains at $stage"
     mv -T -- "$stage" "$history/${stage##*/}" || die "Could not archive old generation; it remains at $stage"
   fi
+  sync_fleet_soul_core
   info "Fleet skills: $installed installed, $updated refreshed, $skipped unchanged -> $target_dir"
 }
 

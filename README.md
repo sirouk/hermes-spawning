@@ -111,14 +111,20 @@ Currently shipped:
 - `skills/fleet-organism-design` — doctrine for shaping a multi-persona fleet
   into one organism: how responsibility, authority, and learning are arranged
   so the fleet improves from its own results. Covers the fractal
-  Observe/Orient/Decide/Act loop, the anti-theatre standard, which store owns
-  which knowledge (`SOUL.md` vs `MEMORY.md` vs documents vs skills vs tools),
+  Observe/Orient/Decide/Act loop, the anti-artifact standard, which native
+  surface owns each kind of state, the observable work state machine,
   independent nowcasts before collective review, separating decision from
   authorization from execution from verification, group-relative (GRPO-inspired)
   comparison for prose and config, retros, and the living versioned operating
   map. `references/fleet-seed.md` carries the founding charter verbatim and is
   the authority when the two disagree. Use it to build out a whole team from
   scratch; it is the design layer, not a repair manual.
+
+- `skills/fleet-convergence-learning` — an append-only, queryable experience
+  ledger and retry guard. It stores bounded outcome episodes and source
+  locators, retrieves only a few condition-matched patterns, preserves
+  contradictions, and prevents an unchanged causal failure from being tried
+  blindly again. It is memory for decisions, not a transcript or report store.
 
 - `skills/hermes-bot-roster-and-rooms` — diagnose the Desktop Bot roster
   and Group Chat registry after a fleet change. The sidebar comes from
@@ -353,16 +359,38 @@ verify its policy before use.
 ./hermes-spawn.sh formation-status all
 ```
 
-`fleet-doctor` reads profile-local job manifests, scripts, Desktop registry
-metadata, and any explicitly supplied handoff policy. It fails on proven
-unarmed active schedules, invalid script paths, or declared missing handoff
-folders; it does **not** start jobs, open live SQLite databases, contact the
-Desktop client, or verify actual delivery. Warnings and `UNVERIFIED` items
-remain open: a clean disk report does not mean the fleet works. An optional
-private, operator-owned JSON policy can specify file-first handoff profiles:
-`{"schema":1,"handoff_profiles":{"HOSTNAME":["default","researcher"]}}`.
-The report does not guess which missions use file handoffs. It does not infer
-spending from job count or pretend unknown-effect executions are resolved.
+`fleet-doctor` reads profile-local job manifests, scripts, and Desktop registry
+metadata. It fails on proven unarmed active schedules, invalid script paths,
+legacy `handoff/` directories, or enabled jobs that direct an internal report,
+cycle-file, close-file, checkpoint, retro, or handoff-artifact workflow. A real
+mission deliverable must declare its path and stable operator-request locator in
+the job's `durable_output` configuration. It does **not** start jobs, open live
+SQLite databases, contact the Desktop client, or verify actual delivery.
+Warnings and `UNVERIFIED` items remain open: a clean disk report does not mean
+the fleet works. It does not infer spending from job count or pretend
+unknown-effect executions are resolved.
+For `desktop_room_capacity`, the doctor estimates the coordinated source-policy
+Desktop **192,000 conservative bytes** and gateway **262,144 Python JSON
+characters** (the gateway counts the full incoming `ui_meta` object, including
+its key wrapper). It also warns when the saved projection approaches the old
+Desktop **48,000-byte** limit or exceeds the old gateway **65,536-character**
+limit. A `PASS` is only a disk estimate, not proof of an installed client or
+gateway version, a successful write, or a rendered room. Even the source patch
+at `patches/hermes-desktop-group-projection-192k.patch` is **not proof that any
+operator's Desktop, including a Mac client, has been upgraded**. The gateway
+can receive other `ui_meta` keys in a write, so a one-key estimate is not a
+full payload guarantee.
+
+Before increasing any room projection, back up the owner's full local Desktop
+state and every gateway projection. Coordinate writers across gateways; do not
+trim unrelated logs, delete missing rooms, or auto-reconcile. Stage the policy:
+upgrade and verify the gateway's new limit **first**; then upgrade and verify
+the actual Desktop client's new limit. Until the affected client is verified,
+treat old-client warnings as active and keep projections within its old budget.
+If rolling back, stop larger publishes, restore/verify a client that stays
+within the old 48,000-byte limit, then roll back the gateway only after incoming
+writes fit its old 65,536-character cap. Preserve room history and revisions;
+reconcile any conflict with the owner rather than replaying blind writes.
 Native `hermes cron doctor` can provide further version-specific findings; it
 also cannot prove that a human saw a room post.
 
@@ -390,21 +418,49 @@ An independent, stricter snapshot check is available to the human operator:
 python3 -B lib/formation_admission.py --instance-dir instances/HOSTNAME --scope mission-buildout --json
 ```
 
-It **denies** unless the operator privately creates a separate `0600`
-`formation-admission.json` with the required schema, bindings, six role
-artifacts, native Desktop room post/reply, client-view witness, and independent
-human audit (schema is documented in the script). The check accepts the
-*operator-attested bound snapshot* only. It neither contacts a live Desktop
-client nor authenticates a human or gates Hermes shell, cron, gateway, proxy,
-or agent tools. Do not grant consequential mission credentials based on its
-exit code alone. The operator must first verify the live client and bounded
-cycle and independently review the evidence. Hold resources behind an
-operator-owned boundary until then. Changed source files or skill
-capability files invalidate the recorded hashes; known mutable skill-usage
-and curator sidecars are not bound. Recheck only after safely capturing a
-consistent snapshot, not by blindly rewriting a receipt. Do not claim a
-connected client saw a post merely because room metadata or a backend ACK
-exists.
+It **denies** unless the operator privately creates one schema-v2 `0600`
+`formation-admission.json` ledger row bound to the current
+`hermes-data/fleet-runtime.yaml`. The runtime contract must describe exactly six
+personas, native Kanban/Group Chat surfaces, the OODA state machine, independent
+fan-out/fan-in, bounded convergence recall, and the no-internal-artifacts rule.
+Admission records native Kanban, room, schedule, stop/recovery, and convergence
+event locators rather than role reports, screenshots, copied evidence, or hash
+trees; the exact schema is documented in the script. The check reads current
+profiles, shared skills, boards, rooms, schedules, and artifact-culture guards,
+but the event locators and people remain operator attestations. It neither
+contacts a live Desktop client nor authenticates a human or gates Hermes shell,
+cron, gateway, proxy, or agent tools. Keep consequential resources behind the
+real operator-controlled boundary and do not call a backend ACK client-visible.
+
+## Recoverable artifact-light cognition reset
+
+`scripts/reset-fleet-cognition.py` is the stopped-only migration from legacy
+fleet cognition and paperwork to the current doctrine. Dry-run is the default;
+`--apply` moves the exact selected state into one private host-side backup,
+installs the repository fleet skills, writes the canonical Fleet Seed SOUL core
+to every existing root and named profile, and leaves every schedule empty and
+the fleet in `FORMING`. It preserves credentials, connection identity,
+configuration, profile metadata, Tailscale state, and mission/source trees. It
+never restarts a fleet.
+
+```bash
+python3 -B scripts/reset-fleet-cognition.py --all --summary
+python3 -B scripts/reset-fleet-cognition.py --all --apply --summary \
+  --backup-dir /absolute/private/backup/path
+```
+
+The full marker-delimited SOUL core is the safe source of truth. A dense
+machine projection is admissible only with the source-bound, independently
+checked directive-recovery certificate defined by the fleet design skill; a
+missing or stale certificate falls back to the full core. Check or synchronize
+the canonical core without touching role-specific text with:
+
+```bash
+python3 -B lib/sync_soul_core.py --instance-dir instances/HOSTNAME \
+  --seed skills/fleet-organism-design/references/fleet-seed.md --json
+python3 -B lib/sync_soul_core.py --instance-dir instances/HOSTNAME \
+  --seed skills/fleet-organism-design/references/fleet-seed.md --apply
+```
 
 ## Read-only readiness and active verification
 
