@@ -548,6 +548,29 @@ plane, a configured model/provider credential, or a trusted Hermes plugin is
 inside part of the trust boundary. For hostile multi-tenant workloads, put each
 pair in its own VM as an additional boundary.
 
+## Operating lessons from live fleets
+
+These were earned the hard way and are non-negotiable doctrine:
+
+1. A `--resume` conversational turn that prints "Another Hermes
+process is using this session" never becomes free: the CLI re-checks for ~30 minutes and then refuses the turn. Abort the driver when the banner first
+appears, free the session, then relaunch — do not queue a second driver.
+2. `docker exec` chat processes survive client disconnect. Killing the
+host-side client does not stop the turn inside the container. Check with
+`docker exec <container> ps -eo pid,args`; kill leftovers with
+`docker exec --privileged -u 0 <container> kill -9 <pids>`.
+3. Drive formation mutations as small, atomic CLI calls (one board, one
+card, one job) and verify mutation by reading raw store bytes — not by the
+echo of the mutating CLI, nor by `hermes cron list` alone.
+4. Let conversational turns interpret and report; never delegate unbounded
+"go form everything" mutations to them. A turn that ends analysis-complete
+but mutation-empty twice in a row is a stall: decompose it.
+
+`scripts/fleet-turn.py` encodes rules 1, 2, and 4 (fast abort on the busy
+banner, leftover-process refuse/kill, stdin prompt piping because
+`--query-file` resolves inside the container). The full doctrine lives in
+`skills/fleet-organism-design/SKILL.md` → "Driving formation turns".
+
 ## Operational notes
 
 - The auth-key file is emptied after the first successful Tailscale login;

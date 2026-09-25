@@ -121,6 +121,46 @@ handshake are one-time. Once the map exists, the enduring doctrine lives in
 configuration and focused skills. Preserve the seed's source locator and
 version; do not create another archival copy.
 
+## Driving formation turns
+
+Formation is driven from the host, not left to wander. These rules come from
+live fleet operation and are doctrine, not suggestion.
+
+1. One conversational driver per session at a time. A resumed session that
+   prints "Another Hermes process is using this session" does not become
+   available later: the CLI re-checks for about 30 minutes and then refuses
+   the turn. Abort the driver at the first copy of that banner, free the
+   session, then relaunch. Never queue a second driver against a busy one.
+2. Killing the host-side client does not stop the turn. `docker exec` chat
+   processes keep running after the client disconnects. Check for leftovers
+   with `docker exec <container> ps -eo pid,args` before relaunching; kill
+   stragglers with `docker exec --privileged -u 0 <container> kill -9 <pids>`
+   (a plain docker exec kill is denied by the container's user namespace).
+3. Formation mutates in small, verifiable batches. An unbounded "go form
+   everything" turn stalls in meta-analysis: the agent reads hook code,
+   debates syntax, and produces documents about building instead of building.
+   Drive mutations as short atomic CLI calls (one board, one card, one job),
+   verify each one before the next, and let conversational turns only
+   interpret and report. A turn that ends analysis-complete but
+   mutation-empty twice in a row is a stall: decompose, do not resume.
+4. Verify success by bytes, not by echo. A mutating CLI can return success
+   while the store stays unchanged, and read-side CLIs can miss journals the
+   writer saw. After each mutation, read the raw store (for example
+   `cron/jobs.json`, the board store, the profile store) and diff bytes;
+   `hermes cron list` alone is not evidence of persistence.
+5. CLI semantics worth memorizing: kanban takes `--board` BEFORE the action
+   and the card title is positional (no `--title` flag); cron `--repeat` is
+   an integer count and the cron expression is the positional argument;
+   `--no-agent` requires `--script`, whose path resolves relative to
+   `~/.hermes/scripts`; `--workdir` must be an existing directory and does
+   not choose the profile store, so per-persona cron jobs need profile
+   scoping at creation; `--query-file <path>` resolves INSIDE the container,
+   so send prompts through stdin instead: `docker exec -i ... --query-file -`
+   with the file piped in.
+
+`scripts/fleet-turn.py` on the host encodes rules 1, 2, and 5's stdin rule
+and refuses to launch against a busy session.
+
 ## Building the team from the mission
 
 The fleet has six personas, and the founding persona is one of them -- not a
