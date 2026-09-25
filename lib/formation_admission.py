@@ -1,681 +1,465 @@
 #!/usr/bin/env python3
-"""Read-only, host-owned *operator-attested* crew formation admission snapshot.
+"""Read-only admission check for a six-persona, native-state Hermes fleet.
 
-    python3 lib/formation_admission.py --instance-dir DIR --scope mission-buildout --json
+This v2 gate binds one private operator ledger row to the current runtime
+contract and native event locators. It deliberately requires no role reports,
+evidence bundle, screenshots, handoff files, cycle files, or hash tree.
 
-This is deliberately separate from advisory formation_status.py and never writes a
-receipt or data. Exit 0 only for an accepted operator-attested crew snapshot;
-exit 1 for every other state. It does NOT authenticate a human, probe a live
-Desktop client, pause jobs, or guard Hermes shell/cron/direct execution. Keep
-mission credentials and execution permission behind real operator-controlled
-boundaries. A mutable agent-controlled artifact can be replaced after a read;
-use a filesystem snapshot/stop writers when atomicity matters.
-
-The operator creates DIR/formation-admission.json outside DIR/hermes-data. The
-instance directory must be owned by the invoking uid and private (no group or
-other bits). The receipt must be an owned, single-link, regular 0600 file.
-No agent-written status, native formation declaration, or CLI option creates it.
-Strict JSON schema v1 (unknown or duplicate keys fail):
+The operator creates INSTANCE/formation-admission.json (0600):
 
 {
- "schema": 1, "instance": "NAME", "mode": "crew", "scope": "mission-buildout",
- "accepted_at": "2026-09-23T12:00:00Z", "map_version": "v0",
- "roles": [{"role": "founder", "profile": "default"}, ...six distinct roles
-           and six distinct profiles, exactly root + five native profiles...],
- "rooms": {"coordination": "id:<client_room_id>", "retrospective": "name:Retro"},
- "member_connection": {"id":"<exact Desktop registry connection id>", "kind":"remote",
-                       "label":"<Desktop connection label>"},
- "operator_declaration": {"name": "human name", "signed_at": "...Z",
-    "statement": "I accept the bound operating map and this crew for mission-buildout only"},
- "human_client_witness": {"observer": "human name", "observed_at": "...Z",
-    "client": "Hermes Desktop", "physically_seen": true,
-    "room_keys": ["name:Coordination", "name:Retro"],
-    "post_id": "on-disk log id", "reply_id": "on-disk log id",
-    "reply_profile": "native responding member profile",
-    "seen_post_text": "visible post text", "seen_reply_text": "visible reply text"},
- "independent_auditor": {"name": "a different human", "reviewed_at": "...Z",
-    "finding": "pass", "observations": "specific independent review"},
- "bindings": {"control_env": REF, "operating_map": REF,
-    "fleet_skills": REF,
-    "default.soul": REF, "default.config": REF, "default.profile": REF,
-    "default.cron": REF, "default.skills": REF,
-    "NAMED.soul": REF, "NAMED.config": REF, "NAMED.profile": REF,
-    "NAMED.cron": REF, "NAMED.skills": REF, ...all five named profiles...},
- "evidence": {"cycle": REF, "client": REF, "audit": REF,
-    "role.ROLE": REF, ...all six roles...}
+  "schema": 2,
+  "instance": "fleet-name",
+  "scope": "mission-buildout",
+  "accepted_at": "2026-09-24T18:00:00Z",
+  "map_version": "v1",
+  "contract": "hermes-data/fleet-runtime.yaml",
+  "member_connection": {"id": "desktop-source-id", "kind": "remote",
+                        "label": "operator-visible label"},
+  "operator_declaration": {"name": "operator", "signed_at": "...Z",
+    "statement": "I accept this crew and map for mission-buildout only"},
+  "client_witness": {"observer": "operator", "observed_at": "...Z",
+    "physically_seen": true,
+    "room_keys": ["id:coordination", "id:improvement"],
+    "post_id": "native-post-id", "reply_id": "native-reply-id",
+    "reply_profile": "one-of-the-six"},
+  "independent_assessor": {"name": "different person", "reviewed_at": "...Z",
+    "finding": "pass"},
+  "native_events": {
+    "role_drills": {"ROLE": "kanban:board/card/event", "...": "..."},
+    "schedule_runs": {"ROLE": "cron:profile/job/execution", "...": "..."},
+    "handoffs": ["kanban:board/card/event"],
+    "room_post": "room:key/event", "room_reply": "room:key/event",
+    "stop_test": "runtime:stop/test-id",
+    "recovery_test": "runtime:recovery/test-id",
+    "independent_assessment": "kanban:board/card/event",
+    "convergence_recall": "ledger:query/event-id",
+    "retry_guard": "ledger:guard/event-id"
+  }
 }
-REF is exactly {"path": "relative/path/under/instance", "sha256": "64 lowercase hex"}.
-Only skill refs name directories; they hash a sorted recursive tree of file
-paths, empty directories, and contents (see _tree_hash), excluding only five
-known mutable telemetry sidecars at each profile skills/ root. Such usage
-and curator state are NOT bound and need a separate audit when relevant.
-All other refs name
-single regular files. No absolute, parent/., symlink, special, or hardlinked
-ref is allowed; a changed byte fails. The operating_map path is inside hermes-data. A canonical
-FLEET_OPERATING_MAP.md has a Version: header matching the receipt near its
-top; alternatively a JSON map has a matching map_version key. Other material
-paths have fixed native locations: control.env; hermes-data/fleet-skills;
-hermes-data/{SOUL.md,config.yaml,profile.yaml,cron/jobs.json,skills};
-and corresponding hermes-data/profiles/NAME/... for named profiles. Thus root
-and named SOUL, config (including secret bytes), six profile-local Desktop
-metadata/room registries, six cron manifests, and six entire skill trees are
-bound, along with the separately mounted shared fleet-skills tree. Every
-profile must load only /opt/data/fleet-skills as an external skill directory;
-this is the launcher mount contract. This reads config bytes to hash them,
-NEVER prints them or any digest.
-If installed Hermes config/skills are symbolic links, this predicate rejects
-them rather than guessing what a mutable external target means.
 
-The root profile.yaml Desktop ui_meta registry must contain both listed native
-rooms: current id:<client_room_id> keys require roomId exactly equal to the
-nonempty key suffix; legacy name:<Display Name> keys require roomId absent or
-null and a matching name. Both need active revisions (id tombstones are final;
-legacy name tombstones are revision-gated) and all six profiles as members with
-the operator-attested exact connection id/kind/label and no known source-missing
-or source-unreachable flag. A hosted groups.send/engine-only room does not meet
-this root ui_meta requirement. A remote connection id must be a Desktop registry
-slug the operator read from their own client (connections.json id / host.agents
-source). It is minted from the connection LABEL, survives renames, and is never
-derived from a gateway hostname, URL, or tailnet name; a guessed id seats ghost
-members that Desktop's gateway filter hides and turns cannot reach.
-The coordination room's saved log must contain the witnessed user post and
-named member-profile reply with exact ids/text, source, common thread, and
-ordered timestamps inside the bound formation cycle.
-That on-disk log is *not* proof of rendering. The witness is the separate,
-explicit human claim of physically seeing both rooms and the reply in Desktop.
-The operator/auditor names and timestamps are claims, not signatures. Their
-identities cannot be proved from uid and mode. Agent-authored evidence is NOT
-self-certification; the human operator and distinct auditor own acceptance.
-
-The bound cycle evidence is a JSON object with schema=1, instance, map_version,
-started_at, completed_at, roles (role->profile), and rooms (same as receipt).
-Each role artifact is a nonempty, distinct regular file in hermes-data. The
-cycle and role evidence are agent-authored and can be false; the independent
-human audits them. Client evidence is a private 0600 host-owned PNG/JPEG
-screenshot and audit evidence is a private 0600 host-owned nonempty file, both
-under formation-evidence/ (outside the hermes-data bind mount). Their hashes
-bind content, not provenance or image authenticity. Witness/cycle/audit and
-operator times must be ordered within 24 hours of acceptance, which cannot be
-future. No receipt expiration is inferred from disk alone: reconfirm live
-conditions separately when needed. This command never prints evidence/ref
-contents, secret-bearing paths, identities, or digests; denial uses codes.
+The runtime contract is executable configuration, not a status essay. Its
+validated shape is documented by `_runtime_contract` below. Current profile,
+shared-skill, board, room, schedule, and anti-artifact invariants are checked
+directly. Native event locators and human identity remain attestations: this
+tool does not contact a live Desktop client or authenticate a person, and it is
+not itself an execution sandbox. Keep consequential credentials behind the
+real operator-controlled admission boundary.
 """
 from __future__ import annotations
 
-# Reading arbitrary untrusted YAML can be resource-intensive even with SafeLoader;
-# restrict bounded profile metadata and never emit its contents.
 import argparse
-from datetime import datetime, timedelta, timezone
-import hashlib
+from datetime import datetime, timezone
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 import re
 import stat
-import sys
+from typing import Any
 
 import yaml
 
-RECEIPT = "formation-admission.json"
+import fleet_doctor
+
+
 SCOPE = "mission-buildout"
-STAMP = timedelta(hours=24)
-HEX = re.compile(r"[0-9a-f]{64}\Z")
-IDENT = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,63}\Z")
-MAP_VERSION = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,63}\Z")
-# A Desktop connection id is a registry slug minted from the connection LABEL
-# the operator typed (lowercase, non-alphanumeric collapsed to "-", <=48 chars,
-# "-2"/"-3" on collision). It is NOT derivable from a gateway hostname, URL, or
-# tailnet name, and a later rename keeps the original id. Only the operator can
-# read it from the Desktop registry, so the exact value is attested here and
-# matched against every saved room seat, never reconstructed from the host.
-CONNECTION_ID = re.compile(r"[a-z0-9]+(?:-[a-z0-9]+)*\Z")
-CHUNK = 128 * 1024
-MAX_RECEIPT = 128 * 1024
-MAX_METADATA = 4 * 1024 * 1024
-MAX_ARTIFACT = 128 * 1024 * 1024
-MAX_TREE_FILES = 20000
-# Native/curator telemetry is mutable even when skill instructions are not.
-# Ignore only these known sidecars at a profile skills/ root, never nested
-# instruction or executable files. This is a capability-corpus hash, not a
-# snapshot of skill usage or curator state; those require separate review.
-SKILL_ROOT_TELEMETRY = frozenset({".usage.json", ".usage.json.lock", ".locks",
-                                  ".curator_state", ".curator_ledger.jsonl"})
+RECEIPT = "formation-admission.json"
+REQUIRED_FUNCTIONS = frozenset({"sensing", "proposal", "challenge", "execution",
+                                "decision", "stewardship"})
+REQUIRED_STATES = ("READY", "OBSERVING", "ORIENTING", "DECIDING", "AUTHORIZING",
+                   "ACTING", "VERIFYING", "LEARNING", "WAITING", "BLOCKED",
+                   "HOLDING", "STOPPED")
+NORMAL_EDGES = (("READY", "OBSERVING"), ("OBSERVING", "ORIENTING"),
+                ("ORIENTING", "DECIDING"), ("DECIDING", "AUTHORIZING"),
+                ("AUTHORIZING", "ACTING"), ("ACTING", "VERIFYING"),
+                ("VERIFYING", "LEARNING"), ("LEARNING", "READY"))
+MEETING_TRIGGERS = frozenset({"material_disagreement", "ambiguity", "consequence",
+                              "cross_role_dependency", "invalidated_assumption"})
+LOCATORS = {
+    "kanban": re.compile(r"^kanban:[^\s]+$"),
+    "cron": re.compile(r"^cron:[^\s]+$"),
+    "room": re.compile(r"^room:[^\s]+$"),
+    "runtime": re.compile(r"^runtime:[^\s]+$"),
+    "ledger": re.compile(r"^ledger:[^\s]+$"),
+    "source": re.compile(r"^[a-z][a-z0-9+.-]{1,31}:[^\s]+$", re.IGNORECASE),
+}
 
 
-class Denied(Exception):
-    """No trusted accepted snapshot; message is a fixed code, never raw data."""
+class Denied(ValueError):
+    pass
 
 
-def _need(ok: bool, code: str) -> None:
-    if not ok:
+def need(condition: bool, code: str) -> None:
+    if not condition:
         raise Denied(code)
 
 
-def _keys(value: object, names: set[str], code: str) -> dict:
-    _need(isinstance(value, dict) and set(value) == names, code)
+def exact(value: Any, keys: set[str], code: str) -> dict:
+    need(isinstance(value, dict) and set(value) == keys, code)
     return value
 
 
-def _text(value: object, code: str, minimum: int = 1) -> str:
-    _need(isinstance(value, str) and len(value.strip()) >= minimum and len(value) <= 10000, code)
+def text(value: Any, code: str, *, max_length: int = 512) -> str:
+    need(isinstance(value, str) and value.strip() == value and 0 < len(value) <= max_length
+         and "\x00" not in value and "\n" not in value and "\r" not in value, code)
     return value
 
 
-def _time(value: object, code: str) -> datetime:
-    _need(isinstance(value, str) and value.endswith("Z"), code)
+def timestamp(value: Any, code: str) -> datetime:
+    raw = text(value, code, max_length=64)
     try:
-        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
-    except ValueError:
-        raise Denied(code) from None
-    _need(parsed.utcoffset() == timedelta(0), code)
-    return parsed
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise Denied(code) from exc
+    need(parsed.tzinfo is not None and parsed.utcoffset() is not None, code)
+    return parsed.astimezone(timezone.utc)
 
 
-def _json(data: bytes, code: str) -> object:
-    def unique(fields: list[tuple[str, object]]) -> dict:
-        if len(fields) != len(dict(fields)):
-            raise ValueError("duplicate")
-        return dict(fields)
+def regular(path: Path, code: str, *, private: bool = False) -> Path:
     try:
-        # JSON NaN/Infinity are not valid admission claims.
-        def reject_constant(_: str) -> None:
-            raise ValueError("nonfinite")
-        return json.loads(data.decode("utf-8"), object_pairs_hook=unique,
-                          parse_constant=reject_constant)
-    except (ValueError, UnicodeError, TypeError):
-        raise Denied(code) from None
+        info = path.lstat()
+    except OSError as exc:
+        raise Denied(code) from exc
+    need(stat.S_ISREG(info.st_mode) and not path.is_symlink() and info.st_nlink == 1, code)
+    need(info.st_uid == os.geteuid(), code)
+    if private:
+        need(stat.S_IMODE(info.st_mode) == 0o600, code)
+    return path
 
 
-def _parts(path: object) -> list[str]:
-    _need(isinstance(path, str) and 0 < len(path) <= 1024 and not path.startswith("/"),
-          "unsafe_reference")
-    parts = path.split("/")
-    _need(all(part not in ("", ".", "..") and "\\" not in part and "\x00" not in part
-              and all(ord(c) >= 32 for c in part) for part in parts), "unsafe_reference")
-    return parts
-
-
-def _open_dir(parent: int, name: str, code: str) -> int:
+def safe_relative(root: Path, value: Any, code: str) -> Path:
+    raw = text(value, code)
+    parts = PurePosixPath(raw).parts
+    need(not PurePosixPath(raw).is_absolute() and parts and all(part not in {"", ".", ".."}
+                                                               for part in parts), code)
+    target = root.joinpath(*parts)
     try:
-        return os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
-                       dir_fd=parent)
-    except OSError:
-        raise Denied(code) from None
+        target.resolve().relative_to(root.resolve())
+    except (OSError, ValueError, RuntimeError) as exc:
+        raise Denied(code) from exc
+    return target
 
 
-def _instance_fd(instance: Path) -> int:
-    raw = os.fspath(instance)
-    _need(bool(raw) and ".." not in raw.split("/") and "\x00" not in raw and
-          instance.name not in ("", "hermes-data"), "unsafe_instance")
-    try:
-        fd = os.open("/" if instance.is_absolute() else ".",
-                     os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC)
-    except OSError:
-        raise Denied("unsafe_instance") from None
-    try:
-        for part in raw.split("/"):
-            if part in ("", "."):
-                continue
-            nxt = _open_dir(fd, part, "unsafe_instance")
-            os.close(fd)
-            fd = nxt
-        meta = os.fstat(fd)
-        _need(meta.st_uid == os.geteuid() and not (meta.st_mode & 0o077)
-              and stat.S_ISDIR(meta.st_mode), "unsafe_instance")
-        return fd
-    except BaseException:
-        os.close(fd)
-        raise
+def locator(value: Any, kind: str, code: str) -> str:
+    raw = text(value, code)
+    need(bool(LOCATORS[kind].fullmatch(raw)), code)
+    return raw
 
 
-def _read(root: int, path: str, code: str, *, limit: int = MAX_ARTIFACT,
-          private: bool = False, keep: bool = False) -> tuple[str, bytes | None]:
-    parts = _parts(path)
-    directory = os.dup(root)
-    try:
-        for part in parts[:-1]:
-            nxt = _open_dir(directory, part, "unsafe_reference")
-            if private:
-                meta = os.fstat(nxt)
-                _need(meta.st_uid == os.geteuid() and not meta.st_mode & 0o077,
-                      "unsafe_reference")
-            os.close(directory)
-            directory = nxt
-        try:
-            fd = os.open(parts[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
-                         | os.O_CLOEXEC, dir_fd=directory)
-        except OSError:
-            raise Denied(code) from None
-        try:
-            before = os.fstat(fd)
-            _need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1
-                  and before.st_size <= limit, code)
-            if private:
-                _need(before.st_uid == os.geteuid() and stat.S_IMODE(before.st_mode) == 0o600,
-                      code)
-            digest = hashlib.sha256()
-            chunks = [] if keep else None
-            total = 0
-            while True:
-                block = os.read(fd, CHUNK)
-                if not block:
-                    break
-                total += len(block)
-                _need(total <= limit, code)
-                digest.update(block)
-                if chunks is not None:
-                    chunks.append(block)
-            after = os.fstat(fd)
-            current = os.stat(parts[-1], dir_fd=directory, follow_symlinks=False)
-            def fingerprint(meta: os.stat_result) -> tuple:
-                return (meta.st_dev, meta.st_ino, meta.st_size, meta.st_mtime_ns,
-                        meta.st_ctime_ns, meta.st_mode, meta.st_uid, meta.st_nlink)
-            _need(total == before.st_size and fingerprint(before) == fingerprint(after)
-                  and fingerprint(before) == fingerprint(current), code)
-            return digest.hexdigest(), b"".join(chunks) if chunks is not None else None
-        finally:
-            os.close(fd)
-    except OSError:
-        raise Denied(code) from None
-    finally:
-        os.close(directory)
+def string_list(value: Any, code: str, *, minimum: int = 1) -> list[str]:
+    need(isinstance(value, list) and len(value) >= minimum, code)
+    result = [text(item, code) for item in value]
+    need(len(result) == len(set(result)), code)
+    return result
 
 
-def _tree_hash(root: int, path: str, *, skill_corpus: bool = False) -> str:
-    parts = _parts(path)
-    directory = os.dup(root)
-    try:
-        for part in parts:
-            nxt = _open_dir(directory, part, "unsafe_reference")
-            os.close(directory)
-            directory = nxt
-        digest = hashlib.sha256(b"formation-admission-tree-v1\0")
-        count = [0]
-
-        def walk(fd: int, prefix: str) -> None:
-            try:
-                names = sorted(os.listdir(fd))
-            except OSError:
-                raise Denied("unsafe_reference") from None
-            for name in names:
-                relative = prefix + name
-                count[0] += 1
-                _need(count[0] <= MAX_TREE_FILES, "unsafe_reference")
-                # Paths are length-prefixed, avoiding ambiguity even with odd names.
-                payload = os.fsencode(relative)
-                _need(b"\x00" not in payload and len(payload) <= 4096,
-                      "unsafe_reference")
-                try:
-                    meta = os.stat(name, dir_fd=fd, follow_symlinks=False)
-                except OSError:
-                    raise Denied("unsafe_reference") from None
-                if skill_corpus and not prefix and name in SKILL_ROOT_TELEMETRY:
-                    _need(stat.S_ISDIR(meta.st_mode) if name == ".locks" else
-                          stat.S_ISREG(meta.st_mode) and meta.st_nlink == 1,
-                          "unsafe_reference")
-                    continue
-                if stat.S_ISDIR(meta.st_mode):
-                    digest.update(b"D" + len(payload).to_bytes(4, "big") + payload)
-                    child = _open_dir(fd, name, "unsafe_reference")
-                    try:
-                        walk(child, relative + "/")
-                    finally:
-                        os.close(child)
-                else:
-                    _need(stat.S_ISREG(meta.st_mode), "unsafe_reference")
-                    hexdigest, _ = _read(fd, name, "unsafe_reference")
-                    digest.update(b"F" + len(payload).to_bytes(4, "big") + payload
-                                  + bytes.fromhex(hexdigest))
-        walk(directory, "")
-        return digest.hexdigest()
-    finally:
-        os.close(directory)
-
-
-def _ref(root: int, value: object, *, expected: str | None = None,
-         prefix: str | None = None, tree: bool = False, private: bool = False,
-         keep: bool = False, require_nonempty: bool = False,
-         limit: int = MAX_ARTIFACT) -> bytes | None:
-    data = _keys(value, {"path", "sha256"}, "invalid_reference")
-    path = data["path"]
-    _parts(path)
-    _need(expected is None or path == expected, "invalid_reference")
-    _need(prefix is None or
-          (path.startswith(prefix) and len(path) > len(prefix)), "invalid_reference")
-    _need(isinstance(data["sha256"], str) and HEX.fullmatch(data["sha256"]) is not None,
-          "invalid_reference")
-    if tree:
-        digest, content = _tree_hash(root, path,
-                                     skill_corpus=path.endswith("/skills")), None
-    else:
-        digest, content = _read(root, path, "unsafe_reference", private=private,
-                                limit=limit, keep=keep)
-        if require_nonempty:
-            # _read's digest is SHA256 even when keep=False. Empty evidence
-            # must fail without retaining or printing arbitrary private data.
-            _need(digest != hashlib.sha256(b"").hexdigest(), "invalid_evidence")
-        _need(content is None or bool(content), "invalid_evidence")
-    _need(digest == data["sha256"], "stale_binding")
-    return content
-
-
-class _StrictLoader(yaml.SafeLoader):
-    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict:
-        self.flatten_mapping(node)
-        result: dict = {}
-        for key_node, value_node in node.value:
-            key = self.construct_object(key_node, deep=deep)
-            if not isinstance(key, (str, int, float, bool)) or key in result:
-                raise ValueError("duplicate/invalid yaml key")
-            result[key] = self.construct_object(value_node, deep=deep)
-        return result
-
-
-def _registry(data: bytes, roles: dict[str, str], rooms: dict, witness: dict,
-              connection: dict, started: datetime, completed: datetime) -> None:
-    try:
-        root = yaml.load(data, Loader=_StrictLoader)
-    except (yaml.YAMLError, ValueError, UnicodeError):
-        raise Denied("invalid_room_registry") from None
-    _need(isinstance(root, dict), "invalid_room_registry")
-    ui = root.get("ui_meta")
-    groups = ui.get("hermes-bots-groups") if isinstance(ui, dict) else None
-    saved = groups.get("rooms") if isinstance(groups, dict) else None
-    _need(isinstance(saved, dict), "invalid_room_registry")
-    deleted = groups.get("deleted", {})
-    _need(isinstance(deleted, dict), "invalid_room_registry")
-    for room_key in rooms.values():
-        _need(isinstance(room_key, str) and room_key in saved, "invalid_room_registry")
-        room = saved[room_key]
-        revision = room.get("revision") if isinstance(room, dict) else None
-        _need(type(revision) is int and revision >= 0, "invalid_room_registry")
-        if room_key.startswith("id:"):
-            # Current Desktop mints a client roomId and keys the saved projection
-            # by that exact id. Its tombstone is final, even if a stale saved
-            # room has a higher revision. A hosted engine-only room is never
-            # found in this root ui_meta registry.
-            _need(len(room_key) > 3 and room_key not in deleted
-                  and room.get("roomId") == room_key[3:]
-                  and isinstance(room.get("name"), str) and bool(room["name"].strip()),
-                  "invalid_room_registry")
-        else:
-            # Legacy Desktop rooms omit roomId or use null. Only these name:
-            # keys use revision-gated tombstones.
-            tombstone = deleted.get(room_key)
-            _need(room_key.startswith("name:") and len(room_key) > 5
-                  and (tombstone is None or type(tombstone) is int and tombstone < revision)
-                  and room.get("roomId") is None and room.get("name") == room_key[5:],
-                  "invalid_room_registry")
-        _need(isinstance(room.get("members"), list), "invalid_room_registry")
-        members = room["members"]
-        _need(len(members) == 6 and
-              {m.get("name") for m in members if isinstance(m, dict)} == set(roles.values())
-              and all(isinstance(m, dict) and m.get("connectionId") == connection["id"]
-                      and m.get("connectionKind") == connection["kind"]
-                      and m.get("connectionLabel") == connection["label"]
-                      and m.get("sourceScoped") is True
-                      and m.get("sourceMissing") is not True
-                      and m.get("sourceReachable") is not False for m in members),
-              "invalid_room_registry")
-    log = saved[rooms["coordination"]].get("log")
-    _need(isinstance(log, list), "invalid_witness")
-    witnessed = []
-    for field_id, field_text, sender_kind, sender_name in (
-            ("post_id", "seen_post_text", "user", None),
-            ("reply_id", "seen_reply_text", "member", witness["reply_profile"])):
-        matched = [event for event in log if isinstance(event, dict)
-                   and event.get("id") == witness[field_id]
-                   and event.get("text") == witness[field_text]
-                   and isinstance(event.get("from"), dict)
-                   and event["from"].get("kind") == sender_kind
-                   and (sender_name is None or event["from"].get("name") == sender_name)
-                   and (sender_kind != "member" or connection["kind"] == "local"
-                        or event["from"].get("source") == connection["label"])]
-        _need(len(matched) == 1, "invalid_witness")
-        witnessed.append(matched[0])
-    post, reply = witnessed
-    _need(isinstance(post.get("thread"), str) and bool(post["thread"])
-          and post["thread"] == reply.get("thread")
-          and type(post.get("at")) is int and type(reply.get("at")) is int
-          and int(started.timestamp() * 1000) <= post["at"] < reply["at"] <=
-          int(completed.timestamp() * 1000), "invalid_witness")
-
-
-def _roster(root: int, roles: dict[str, str]) -> None:
-    _need("default" in roles.values(), "invalid_roster")
-    home = _open_dir(root, "hermes-data", "invalid_roster")
-    try:
-        profile_dir = _open_dir(home, "profiles", "invalid_roster")
-        try:
-            try:
-                names = os.listdir(profile_dir)
-            except OSError:
-                raise Denied("invalid_roster") from None
-            native: list[str] = []
-            for name in names:
-                if name.startswith("."):
-                    continue
-                _need(IDENT.fullmatch(name) is not None and name != "default", "invalid_roster")
-                child = _open_dir(profile_dir, name, "invalid_roster")
-                os.close(child)
-                native.append(name)
-            _need(len(native) == 5 and set(native) == set(roles.values()) - {"default"},
-                  "invalid_roster")
-        finally:
-            os.close(profile_dir)
-    finally:
-        os.close(home)
-
-
-def _accepted(root: int, instance: str, scope: str, now: datetime) -> None:
-    _, blob = _read(root, RECEIPT, "unsafe_receipt", limit=MAX_RECEIPT,
-                    private=True, keep=True)
-    receipt = _keys(_json(blob, "invalid_receipt"),
-                    {"schema", "instance", "mode", "scope", "accepted_at", "map_version",
-                     "roles", "rooms", "member_connection", "operator_declaration",
-                     "human_client_witness", "independent_auditor", "bindings", "evidence"},
-                    "invalid_receipt")
-    _need(type(receipt["schema"]) is int and receipt["schema"] == 1
-          and receipt["instance"] == instance and receipt["mode"] == "crew"
-          and receipt["scope"] == scope == SCOPE, "invalid_scope_or_instance")
-    accepted = _time(receipt["accepted_at"], "invalid_time")
-    _need(accepted <= now, "invalid_time")
-    version = _text(receipt["map_version"], "invalid_map")
-    _need(MAP_VERSION.fullmatch(version) is not None and not version.endswith("."), "invalid_map")
-    listed = receipt["roles"]
-    _need(isinstance(listed, list) and len(listed) == 6, "invalid_roster")
+def _profiles(instance: Path, rows: list[dict]) -> tuple[dict[str, str], dict[str, Path]]:
+    need(isinstance(rows, list) and len(rows) == 6, "invalid_personas")
     roles: dict[str, str] = {}
-    for item in listed:
-        item = _keys(item, {"role", "profile"}, "invalid_roster")
-        role, profile = item["role"], item["profile"]
-        _need(isinstance(role, str) and IDENT.fullmatch(role) is not None
-              and isinstance(profile, str) and IDENT.fullmatch(profile) is not None
-              and role not in roles, "invalid_roster")
+    paths: dict[str, Path] = {}
+    functions: set[str] = set()
+    decision_profiles: set[str] = set()
+    for row in rows:
+        row = exact(row, {"role", "profile", "responsibility", "functions", "tools",
+                          "skills", "authority"}, "invalid_personas")
+        role = text(row["role"], "invalid_personas", max_length=80)
+        profile = text(row["profile"], "invalid_personas", max_length=80)
+        need(re.fullmatch(r"[A-Za-z0-9_-]+", profile) is not None, "invalid_personas")
+        text(row["responsibility"], "invalid_personas")
+        owned = set(string_list(row["functions"], "invalid_personas"))
+        tools = string_list(row["tools"], "invalid_personas")
+        skills = string_list(row["skills"], "invalid_personas")
+        string_list(row["authority"], "invalid_personas")
+        need(all(re.fullmatch(r"[a-z][a-z0-9_-]*", name) for name in owned),
+             "invalid_personas")
+        need("fleet-convergence-learning" in skills and tools, "missing_convergence_capability")
+        need(role not in roles and profile not in paths, "invalid_personas")
         roles[role] = profile
-    _need(len(set(roles.values())) == 6, "invalid_roster")
-    _roster(root, roles)
-    rooms = _keys(receipt["rooms"], {"coordination", "retrospective"}, "invalid_room_registry")
-    _need(all(isinstance(v, str) and
-              ((v.startswith("name:") and len(v) > 5) or
-               (v.startswith("id:") and bool(v[3:].strip())))
-              for v in rooms.values()) and len(set(rooms.values())) == 2,
-          "invalid_room_registry")
-    connection = _keys(receipt["member_connection"],
-                       {"id", "kind", "label"}, "invalid_connection")
-    connection_id = _text(connection["id"], "invalid_connection")
-    _text(connection["label"], "invalid_connection")
-    _need(connection["kind"] in ("remote", "local") and
-          ((connection_id == "local" and connection["kind"] == "local") or
-           (connection["kind"] == "remote" and connection_id != "local"
-            and len(connection_id) <= 48
-            and CONNECTION_ID.fullmatch(connection_id) is not None)),
-          "invalid_connection")
-    operator = _keys(receipt["operator_declaration"],
-                     {"name", "signed_at", "statement"}, "invalid_operator")
-    operator_name = _text(operator["name"], "invalid_operator")
-    _need(operator["statement"] == "I accept the bound operating map and this crew for mission-buildout only",
-          "invalid_operator")
-    signed = _time(operator["signed_at"], "invalid_operator")
-    witness = _keys(receipt["human_client_witness"],
-                    {"observer", "observed_at", "client", "physically_seen",
-                     "room_keys", "post_id", "reply_id", "reply_profile",
-                     "seen_post_text", "seen_reply_text"}, "invalid_witness")
-    witness_name = _text(witness["observer"], "invalid_witness")
-    observed = _time(witness["observed_at"], "invalid_witness")
-    _need(witness["client"] == "Hermes Desktop" and witness["physically_seen"] is True
-          and witness["room_keys"] == [rooms["coordination"], rooms["retrospective"]]
-          and witness["reply_profile"] in roles.values()
-          and witness["post_id"] != witness["reply_id"], "invalid_witness")
-    for key in ("post_id", "reply_id"):
-        _text(witness[key], "invalid_witness")
-    for key in ("seen_post_text", "seen_reply_text"):
-        _text(witness[key], "invalid_witness", minimum=12)
-    auditor = _keys(receipt["independent_auditor"],
-                    {"name", "reviewed_at", "finding", "observations"}, "invalid_auditor")
-    audit_name = _text(auditor["name"], "invalid_auditor")
-    reviewed = _time(auditor["reviewed_at"], "invalid_auditor")
-    _need(audit_name.casefold().strip() not in {operator_name.casefold().strip(),
-           witness_name.casefold().strip(), *(n.casefold() for n in roles.values())}
-          and auditor["finding"] == "pass", "invalid_auditor")
-    _text(auditor["observations"], "invalid_auditor", minimum=32)
-    bindings: dict = _keys(receipt["bindings"],
-                           {"control_env", "operating_map", "fleet_skills"} |
-                           {f"{p}.{kind}" for p in roles.values()
-                            for kind in ("soul", "config", "profile", "cron", "skills")},
-                           "invalid_binding")
-    control_blob = _ref(root, bindings["control_env"], expected="control.env",
-                        keep=True, limit=MAX_METADATA)
+        base = instance / "hermes-data" if profile == "default" else instance / "hermes-data/profiles" / profile
+        need(base.is_dir() and not base.is_symlink(), "missing_profile")
+        for filename in ("SOUL.md", "config.yaml", "profile.yaml"):
+            regular(base / filename, "missing_profile")
+        need(not (base / "handoff").exists(), "legacy_file_handoff")
+        functions.update(owned)
+        if "decision" in owned:
+            decision_profiles.add(profile)
+        paths[profile] = base
+    need("default" in paths and len(paths) == 6, "invalid_personas")
+    need(REQUIRED_FUNCTIONS <= functions, "missing_function_coverage")
+    need(len(decision_profiles) == 1, "invalid_decision_ownership")
+    return roles, paths
+
+
+def _surfaces(instance: Path, value: Any) -> tuple[dict, list[str]]:
+    value = exact(value, {"truth", "flow", "deliberation", "memory", "cognition", "timing"},
+                  "invalid_surfaces")
+    need(value["truth"] == "authoritative-tools", "invalid_surfaces")
+    need(value["cognition"] == "ephemeral-session", "invalid_surfaces")
+    need(value["timing"] == "native-schedules-and-triggers", "invalid_surfaces")
+    flow = exact(value["flow"], {"kind", "coordination_board", "improvement_board"},
+                 "invalid_surfaces")
+    need(flow["kind"] == "kanban", "invalid_surfaces")
+    boards = [text(flow[key], "invalid_surfaces", max_length=100)
+              for key in ("coordination_board", "improvement_board")]
+    need(len(set(boards)) == 2 and all(re.fullmatch(r"[A-Za-z0-9_-]+", board) for board in boards),
+         "invalid_surfaces")
+    for board in boards:
+        directory = instance / "hermes-data/kanban/boards" / board
+        need(directory.is_dir() and not directory.is_symlink()
+             and ((directory / "board.json").is_file() or (directory / "kanban.db").is_file()),
+             "missing_native_board")
+    rooms = exact(value["deliberation"], {"kind", "coordination_room", "improvement_room"},
+                  "invalid_surfaces")
+    need(rooms["kind"] == "group-chat", "invalid_surfaces")
+    room_keys = [text(rooms[key], "invalid_surfaces")
+                 for key in ("coordination_room", "improvement_room")]
+    need(len(set(room_keys)) == 2 and all(key.startswith(("id:", "name:")) for key in room_keys),
+         "invalid_surfaces")
+    memory = exact(value["memory"], {"kind", "path", "recall_limit", "char_budget"},
+                   "invalid_surfaces")
+    need(memory["kind"] == "convergence-ledger"
+         and isinstance(memory["recall_limit"], int) and not isinstance(memory["recall_limit"], bool)
+         and 1 <= memory["recall_limit"] <= 10
+         and isinstance(memory["char_budget"], int) and not isinstance(memory["char_budget"], bool)
+         and 256 <= memory["char_budget"] <= 8000, "invalid_surfaces")
+    path = safe_relative(instance, memory["path"], "invalid_surfaces")
+    need(path == instance / "hermes-data/fleet-state/convergence.db", "invalid_surfaces")
+    return {"boards": boards, "rooms": room_keys}, room_keys
+
+
+def _state_machine(value: Any, profiles: set[str]) -> None:
+    value = exact(value, {"state_surface", "states", "transitions"}, "invalid_state_machine")
+    need(value["state_surface"] == "kanban", "invalid_state_machine")
+    states = set(string_list(value["states"], "invalid_state_machine"))
+    need(set(REQUIRED_STATES) <= states, "invalid_state_machine")
+    transitions = value["transitions"]
+    need(isinstance(transitions, list) and transitions, "invalid_state_machine")
+    edges: set[tuple[str, str]] = set()
+    for transition in transitions:
+        transition = exact(transition, {"from", "to", "event", "guard", "owner", "surface"},
+                           "invalid_state_machine")
+        source = text(transition["from"], "invalid_state_machine")
+        target = text(transition["to"], "invalid_state_machine")
+        need(source in states and target in states and transition["surface"] == "kanban",
+             "invalid_state_machine")
+        text(transition["event"], "invalid_state_machine")
+        text(transition["guard"], "invalid_state_machine")
+        need(transition["owner"] in profiles, "invalid_state_machine")
+        edges.add((source, target))
+    need(set(NORMAL_EDGES) <= edges, "incomplete_ooda_state_machine")
+
+
+def _fanout(value: Any, profiles: set[str], decision_profile: str) -> None:
+    value = exact(value, {"independent", "common_evidence_cutoff", "common_reward_dimensions",
+                          "max_parallel", "fan_in", "evaluator_profile", "meeting_triggers"},
+                  "invalid_fanout")
+    need(value["independent"] is True and value["common_evidence_cutoff"] is True
+         and value["common_reward_dimensions"] is True and value["fan_in"] == "group-chat",
+         "invalid_fanout")
+    need(isinstance(value["max_parallel"], int) and not isinstance(value["max_parallel"], bool)
+         and 1 <= value["max_parallel"] <= 6, "invalid_fanout")
+    need(value["evaluator_profile"] in profiles and value["evaluator_profile"] != decision_profile,
+         "non_independent_evaluator")
+    need(MEETING_TRIGGERS <= set(string_list(value["meeting_triggers"], "invalid_fanout")),
+         "invalid_fanout")
+
+
+def _persistence(value: Any) -> None:
+    value = exact(value, {"internal_artifacts", "allowed", "mission_deliverable_requires_operator_locator",
+                          "retain_chain_of_thought"}, "invalid_persistence")
+    allowed = set(string_list(value["allowed"], "invalid_persistence"))
+    required = {"configuration", "skill", "tool", "mission-deliverable", "native-state",
+                "convergence-ledger"}
+    need(value["internal_artifacts"] == "forbidden" and allowed == required
+         and value["mission_deliverable_requires_operator_locator"] is True
+         and value["retain_chain_of_thought"] is False, "invalid_persistence")
+
+
+def _runtime_contract(instance: Path, path: Path, expected_version: str) -> tuple[dict[str, str], list[str]]:
+    regular(path, "unsafe_runtime_contract")
     try:
-        hostnames = [line.split("=", 1)[1].strip().strip('"').strip("'")
-                     for line in control_blob.decode("utf-8").splitlines()
-                     if line.startswith("TAILSCALE_HOSTNAME=")]
-    except UnicodeError:
-        raise Denied("invalid_connection") from None
-    # The control.env hostname binds the instance, NOT the Desktop connection
-    # id: the id comes from the operator's client registry and frequently does
-    # not contain the hostname at all. Requiring a hostname prefix here
-    # rejected legitimate registries and invited hostname-derived guesses.
-    _need(len(hostnames) == 1 and IDENT.fullmatch(hostnames[0]) is not None,
-          "invalid_connection")
-    _ref(root, bindings["fleet_skills"], expected="hermes-data/fleet-skills", tree=True)
-    map_ref = bindings["operating_map"]
-    _need(isinstance(map_ref, dict) and map_ref.get("path") != RECEIPT,
-          "invalid_binding")
-    map_path = map_ref.get("path")
-    map_blob = _ref(root, map_ref, prefix="hermes-data/", keep=True, limit=MAX_METADATA)
-    if map_path.endswith("/FLEET_OPERATING_MAP.md"):
-        # Actual fleet operating maps are versioned Markdown, not synthetic
-        # JSON files. Match a standalone Version label near the top and do
-        # not mistake an unversioned document elsewhere for the bound map.
+        contract = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise Denied("invalid_runtime_contract") from exc
+    contract = exact(contract, {"schema", "map_version", "stage", "mission", "personas",
+                                "surfaces", "state_machine", "fanout", "persistence"},
+                     "invalid_runtime_contract")
+    need(contract["schema"] == 1 and contract["map_version"] == expected_version
+         and contract["stage"] == "FORMATION_PASSED", "invalid_runtime_contract")
+    mission = exact(contract["mission"], {"id", "source"}, "invalid_runtime_contract")
+    text(mission["id"], "invalid_runtime_contract")
+    locator(mission["source"], "source", "invalid_runtime_contract")
+    roles, profile_paths = _profiles(instance, contract["personas"])
+    _, room_keys = _surfaces(instance, contract["surfaces"])
+    decision = next(row["profile"] for row in contract["personas"] if "decision" in row["functions"])
+    _state_machine(contract["state_machine"], set(profile_paths))
+    _fanout(contract["fanout"], set(profile_paths), decision)
+    _persistence(contract["persistence"])
+    shared = instance / "hermes-data/fleet-skills"
+    for skill in ("fleet-organism-design", "fleet-convergence-learning"):
+        regular(shared / skill / "SKILL.md", "missing_shared_skill")
+    for profile_path in profile_paths.values():
         try:
-            opening = map_blob.decode("utf-8").splitlines()[:16]
-        except UnicodeError:
-            raise Denied("invalid_map") from None
-        labels = [line.removeprefix("Version:").strip().split(maxsplit=1)[0].rstrip(".")
-                  for line in opening if line.startswith("Version:") and
-                  line.removeprefix("Version:").strip()]
-        _need(labels == [version], "invalid_map")
-    elif isinstance(map_path, str) and map_path.endswith(".json"):
-        operating_map = _json(map_blob, "invalid_map")
-        _need(isinstance(operating_map, dict) and
-              operating_map.get("map_version") == version, "invalid_map")
-    else:
-        raise Denied("invalid_map")
-    profile_data = None
-    for p in sorted(roles.values()):
-        prefix = "hermes-data" if p == "default" else f"hermes-data/profiles/{p}"
-        for kind, suffix in (("soul", "SOUL.md"), ("config", "config.yaml"),
-                             ("profile", "profile.yaml"), ("cron", "cron/jobs.json"),
-                             ("skills", "skills")):
-            content = _ref(root, bindings[f"{p}.{kind}"], expected=f"{prefix}/{suffix}",
-                           tree=(kind == "skills"), keep=(p == "default" and kind == "profile"),
-                           limit=MAX_METADATA if kind == "profile" else MAX_ARTIFACT)
-            if kind == "config":
-                # These installed profiles load the separately mounted shared
-                # policy tree. A different/unbound external skill directory
-                # changes effective instructions, so fail closed.
-                _, raw_config = _read(root, f"{prefix}/config.yaml", "invalid_binding",
-                                      keep=True, limit=MAX_METADATA)
-                try:
-                    parsed_config = yaml.load(raw_config, Loader=_StrictLoader)
-                except (yaml.YAMLError, ValueError, UnicodeError):
-                    raise Denied("invalid_binding") from None
-                skills_config = parsed_config.get("skills") if isinstance(parsed_config, dict) else None
-                _need(isinstance(skills_config, dict) and
-                      skills_config.get("external_dirs") == ["/opt/data/fleet-skills"],
-                      "unbound_skill_source")
-            if p == "default" and kind == "profile":
-                profile_data = content
-    evidence = _keys(receipt["evidence"], {"cycle", "client", "audit"} |
-                     {f"role.{role}" for role in roles}, "invalid_evidence")
-    all_paths = [ref.get("path") if isinstance(ref, dict) else None for ref in
-                 list(bindings.values()) + list(evidence.values())]
-    _need(len(set(map(str, all_paths))) == len(all_paths), "invalid_reference")
-    cycle_blob = _ref(root, evidence["cycle"], prefix="hermes-data/", keep=True,
-                      limit=MAX_METADATA)
-    cycle = _keys(_json(cycle_blob, "invalid_evidence"),
-                  {"schema", "instance", "map_version", "started_at", "completed_at",
-                   "roles", "rooms"}, "invalid_evidence")
-    started = _time(cycle["started_at"], "invalid_evidence")
-    completed = _time(cycle["completed_at"], "invalid_evidence")
-    _need(type(cycle["schema"]) is int and cycle["schema"] == 1
-          and cycle["instance"] == instance and cycle["map_version"] == version
-          and cycle["roles"] == roles and cycle["rooms"] == rooms,
-          "invalid_evidence")
-    _need(started <= completed <= observed <= reviewed <= signed <= accepted
-          and accepted - started <= STAMP, "invalid_time")
-    _registry(profile_data, roles, rooms, witness, connection, started, completed)
-    for role in roles:
-        _ref(root, evidence[f"role.{role}"], prefix="hermes-data/", require_nonempty=True)
-    image = _ref(root, evidence["client"], prefix="formation-evidence/",
-                 private=True, keep=True, limit=MAX_METADATA)
-    _need(image.startswith((b"\x89PNG\r\n\x1a\n", b"\xff\xd8\xff"))
-          and len(image) >= 32, "invalid_witness")
-    _ref(root, evidence["audit"], prefix="formation-evidence/", private=True,
-         require_nonempty=True)
+            config = yaml.safe_load((profile_path / "config.yaml").read_text(encoding="utf-8")) or {}
+        except (OSError, UnicodeError, yaml.YAMLError) as exc:
+            raise Denied("invalid_profile_config") from exc
+        dirs = ((config.get("skills") or {}).get("external_dirs") if isinstance(config, dict) else None)
+        need(isinstance(dirs, list) and "/opt/data/fleet-skills" in dirs,
+             "missing_shared_skill_wiring")
+        jobs = fleet_doctor._jobs(profile_path / "cron/jobs.json")
+        for job in jobs:
+            active = (job.get("enabled", True) is not False
+                      and job.get("state") not in {"paused", "completed"} and not job.get("paused_at"))
+            if active:
+                status, _ = fleet_doctor._artifact_culture(job, profile_path)
+                need(status != "FAIL", "artifact_job_active")
+    return roles, room_keys
 
 
-def inspect(instance_dir: Path, scope: str = SCOPE, *,
-            now: datetime | None = None) -> tuple[dict, int]:
-    """No side effects; return a data-minimal denial code, not evidence contents."""
-    report = {"schema": 1, "instance": Path(instance_dir).name, "scope": scope,
-              "read_only": True, "status": "denied", "admitted": False,
-              "operator_attested": False, "native_enforced": False,
-              "live_client_verified": False}
-    fd = None
+def _rooms(instance: Path, roles: dict[str, str], room_keys: list[str], connection: dict) -> None:
+    profile = regular(instance / "hermes-data/profile.yaml", "invalid_room_registry")
     try:
-        _need(scope == SCOPE, "invalid_scope_or_instance")
-        _need(isinstance(now, datetime) or now is None, "invalid_time")
-        fd = _instance_fd(Path(instance_dir))
-        _accepted(fd, Path(instance_dir).name, scope, now or datetime.now(timezone.utc))
-        report["status"] = "accepted_operator_attested"
-        report["admitted"] = True
-        report["operator_attested"] = True
-        return report, 0
-    except Denied as exc:
-        report["reason"] = str(exc)
-        return report, 1
-    except (OSError, ValueError, TypeError, OverflowError, RecursionError):
-        # Unexpected malformed input must fail closed without disclosing paths.
-        report["reason"] = "invalid_or_unreadable"
-        return report, 1
-    finally:
-        if fd is not None:
-            os.close(fd)
+        data = yaml.safe_load(profile.read_text(encoding="utf-8")) or {}
+    except (OSError, UnicodeError, yaml.YAMLError) as exc:
+        raise Denied("invalid_room_registry") from exc
+    ui = data.get("ui_meta") if isinstance(data, dict) else None
+    registry = ui.get("hermes-bots-groups") if isinstance(ui, dict) else None
+    rooms = registry.get("rooms") if isinstance(registry, dict) else None
+    need(isinstance(rooms, dict), "invalid_room_registry")
+    expected_profiles = set(roles.values())
+    for key in room_keys:
+        room = rooms.get(key)
+        need(isinstance(room, dict) and not room.get("tombstone"), "invalid_room_registry")
+        members = room.get("members")
+        need(isinstance(members, list) and len(members) == 6, "invalid_room_registry")
+        seen: set[str] = set()
+        for member in members:
+            need(isinstance(member, dict) and member.get("connectionId") == connection["id"]
+                 and member.get("connectionKind") == connection["kind"]
+                 and member.get("connectionLabel") == connection["label"], "invalid_room_registry")
+            name = member.get("name")
+            need(isinstance(name, str) and name in expected_profiles and name not in seen,
+                 "invalid_room_registry")
+            seen.add(name)
+        need(seen == expected_profiles, "invalid_room_registry")
+
+
+def _event_map(value: Any, roles: set[str], kind: str, code: str) -> dict[str, str]:
+    need(isinstance(value, dict) and set(value) == roles, code)
+    return {role: locator(item, kind, code) for role, item in value.items()}
+
+
+def _unique_pairs(pairs: list[tuple[str, Any]]) -> dict:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate JSON key")
+        result[key] = value
+    return result
+
+
+def _accepted(instance: Path, scope: str, now: datetime, max_age_hours: float) -> None:
+    receipt_path = regular(instance / RECEIPT, "unsafe_admission_ledger", private=True)
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"),
+                             object_pairs_hook=_unique_pairs)
+    except (OSError, UnicodeError, ValueError) as exc:
+        raise Denied("invalid_admission_ledger") from exc
+    receipt = exact(receipt, {"schema", "instance", "scope", "accepted_at", "map_version",
+                              "contract", "member_connection", "operator_declaration",
+                              "client_witness", "independent_assessor", "native_events"},
+                    "invalid_admission_ledger")
+    need(receipt["schema"] == 2 and receipt["instance"] == instance.name
+         and receipt["scope"] == scope == SCOPE, "invalid_scope_or_instance")
+    accepted_at = timestamp(receipt["accepted_at"], "invalid_time")
+    need(accepted_at <= now and (now - accepted_at).total_seconds() <= max_age_hours * 3600,
+         "stale_admission")
+    version = text(receipt["map_version"], "invalid_runtime_contract")
+    contract_path = safe_relative(instance, receipt["contract"], "unsafe_runtime_contract")
+    roles, room_keys = _runtime_contract(instance, contract_path, version)
+
+    connection = exact(receipt["member_connection"], {"id", "kind", "label"},
+                       "invalid_connection")
+    text(connection["id"], "invalid_connection")
+    need(connection["kind"] == "remote", "invalid_connection")
+    text(connection["label"], "invalid_connection")
+    _rooms(instance, roles, room_keys, connection)
+
+    operator = exact(receipt["operator_declaration"], {"name", "signed_at", "statement"},
+                     "invalid_operator_declaration")
+    operator_name = text(operator["name"], "invalid_operator_declaration")
+    signed = timestamp(operator["signed_at"], "invalid_operator_declaration")
+    need("mission-buildout only" in text(operator["statement"], "invalid_operator_declaration")
+         and signed <= accepted_at, "invalid_operator_declaration")
+
+    witness = exact(receipt["client_witness"], {"observer", "observed_at", "physically_seen",
+                                                "room_keys", "post_id", "reply_id", "reply_profile"},
+                    "invalid_client_witness")
+    need(witness["observer"] == operator_name and witness["physically_seen"] is True
+         and set(string_list(witness["room_keys"], "invalid_client_witness")) == set(room_keys)
+         and witness["reply_profile"] in set(roles.values()), "invalid_client_witness")
+    observed = timestamp(witness["observed_at"], "invalid_client_witness")
+    text(witness["post_id"], "invalid_client_witness")
+    text(witness["reply_id"], "invalid_client_witness")
+    need(observed <= signed, "invalid_client_witness")
+
+    assessor = exact(receipt["independent_assessor"], {"name", "reviewed_at", "finding"},
+                     "invalid_assessor")
+    need(text(assessor["name"], "invalid_assessor") != operator_name
+         and assessor["finding"] == "pass", "invalid_assessor")
+    reviewed = timestamp(assessor["reviewed_at"], "invalid_assessor")
+    need(observed <= reviewed <= signed, "invalid_assessor")
+
+    events = exact(receipt["native_events"], {"role_drills", "schedule_runs", "handoffs",
+                                                     "room_post", "room_reply", "stop_test",
+                                                     "recovery_test", "independent_assessment",
+                                                     "convergence_recall", "retry_guard"},
+                   "invalid_native_events")
+    _event_map(events["role_drills"], set(roles), "kanban", "invalid_native_events")
+    _event_map(events["schedule_runs"], set(roles), "cron", "invalid_native_events")
+    handoffs = string_list(events["handoffs"], "invalid_native_events")
+    need(all(LOCATORS["kanban"].fullmatch(item) for item in handoffs), "invalid_native_events")
+    for key, kind in (("room_post", "room"), ("room_reply", "room"),
+                      ("stop_test", "runtime"), ("recovery_test", "runtime"),
+                      ("independent_assessment", "kanban"),
+                      ("convergence_recall", "ledger"), ("retry_guard", "ledger")):
+        locator(events[key], kind, "invalid_native_events")
+
+
+def inspect(instance_dir: Path, scope: str = SCOPE, *, now: datetime | None = None,
+            max_age_hours: float = 24.0) -> tuple[dict, int]:
+    result = {"schema": 2, "read_only": True, "native_enforced": False,
+              "live_client_verified": False, "native_event_locators_resolved": False,
+              "operator_attested": False, "admitted": False, "scope": scope}
+    try:
+        instance = Path(instance_dir)
+        info = instance.lstat()
+        need(instance.is_dir() and not instance.is_symlink() and info.st_uid == os.geteuid()
+             and stat.S_IMODE(info.st_mode) & 0o077 == 0, "unsafe_instance")
+        need(isinstance(max_age_hours, (int, float)) and not isinstance(max_age_hours, bool)
+             and 0 < max_age_hours <= 168, "invalid_max_age")
+        _accepted(instance, scope, now or datetime.now(timezone.utc), float(max_age_hours))
+    except (Denied, OSError) as exc:
+        result.update(status="denied", reason=str(exc))
+        return result, 1
+    result.update(status="accepted_operator_attested_native_references",
+                  operator_attested=True, admitted=True)
+    return result, 0
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--instance-dir", type=Path, required=True)
-    parser.add_argument("--scope", required=True)
-    parser.add_argument("--json", action="store_true", help="output one JSON decision")
+    parser.add_argument("--scope", default=SCOPE, choices=[SCOPE])
+    parser.add_argument("--max-age-hours", type=float, default=24.0)
+    parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
-    report, rc = inspect(args.instance_dir, args.scope)
+    result, rc = inspect(args.instance_dir, args.scope, max_age_hours=args.max_age_hours)
     if args.json:
-        print(json.dumps(report, sort_keys=True))
+        print(json.dumps(result, sort_keys=True))
     else:
-        print(f"{report['status']}: operator-attested snapshot, not native enforced"
-              if rc == 0 else f"denied: {report['reason']}")
+        print(f"Formation admission: {result['status']} ({result.get('reason', 'operator-attested')})")
+        print("Native event locators and human identity are not resolved by this read-only check.")
     return rc
 
 

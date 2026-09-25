@@ -142,19 +142,16 @@ class DoctorTests(unittest.TestCase):
         self.assertEqual(rc, 1)
         self.assertEqual(findings(data, "script")[0]["status"], "FAIL")
 
-    def test_declared_handoff_fails_only_when_explicit(self):
+    def test_legacy_handoff_directory_is_a_proven_artifact_culture_failure(self):
         put_jobs(self.instance, job())
-        policy = self.root / "policy.json"
-        policy.write_text(json.dumps({"schema": 1, "handoff_profiles": {"test-fleet": ["alice"]}}))
-        data, rc = self.run_doc(policy_file=policy)
-        self.assertEqual(rc, 1)
-        self.assertEqual(next(r for r in findings(data, "handoff") if r["profile"] == "alice")["status"], "FAIL")
         (self.instance / "hermes-data" / "profiles" / "alice" / "handoff").mkdir()
-        data, rc = self.run_doc(policy_file=policy)
-        self.assertEqual(rc, 0)
-        self.assertEqual(next(r for r in findings(data, "handoff") if r["profile"] == "alice")["status"], "PASS")
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 1)
+        rows = [row for row in findings(data, "artifact_culture")
+                if row["profile"] == "alice" and "handoff path" in row["detail"]]
+        self.assertEqual([row["status"] for row in rows], ["FAIL"])
 
-    def test_malformed_manifest_or_explicit_policy_errors_rc2(self):
+    def test_malformed_manifest_errors_rc2(self):
         bad = self.instance / "hermes-data" / "profiles" / "alice" / "cron" / "jobs.json"
         bad.write_text("{oops")
         result, rc = self.run_doc()
@@ -164,11 +161,39 @@ class DoctorTests(unittest.TestCase):
         bad.write_text("[]")
         _, rc = self.run_doc()
         self.assertEqual(rc, 2)
-        put_jobs(self.instance, job())
-        policy = self.root / "policy.json"
-        policy.write_text(json.dumps({"schema": 1, "handoff_profiles": {"test-fleet": ["ghost"]}}))
-        _, rc = self.run_doc(policy_file=policy)
-        self.assertEqual(rc, 2)
+
+    def test_internal_artifact_job_fails_and_native_flow_job_passes(self):
+        artifact = job()
+        artifact["prompt"] = "Write your nowcast to <cycle_dir>/scout/nowcast.md and retro.md."
+        put_jobs(self.instance, artifact)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 1)
+        self.assertEqual(findings(data, "artifact_culture")[0]["status"], "FAIL")
+
+        native = job()
+        native["prompt"] = ("Observe the live source, recall bounded convergence patterns, then "
+                            "advance the owning Kanban card and post decision-relevant facts in the room.")
+        native["durable_output"] = {"class": "native_state"}
+        put_jobs(self.instance, native)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 0)
+        self.assertEqual(findings(data, "artifact_culture")[0]["status"], "PASS")
+
+    def test_real_mission_deliverable_needs_operator_locator(self):
+        delivery = job()
+        delivery["prompt"] = "Produce the requested report and write it to /opt/data/report.md."
+        delivery["durable_output"] = {"class": "mission_deliverable",
+                                      "path": "/opt/data/report.md",
+                                      "operator_request": "kanban:board/card-42"}
+        put_jobs(self.instance, delivery)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 0)
+        self.assertEqual(findings(data, "artifact_culture")[0]["status"], "PASS")
+        delivery["durable_output"]["operator_request"] = "trust me"
+        put_jobs(self.instance, delivery)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 1)
+        self.assertIn("scheme:locator", findings(data, "artifact_culture")[0]["detail"])
 
     def test_all_aggregate_one_report_and_failure(self):
         second = make_instance(self.root, "other")
@@ -273,34 +298,72 @@ class DoctorTests(unittest.TestCase):
         (home / "profile.yaml").write_text(
             (home / "profiles" / "alice" / "profile.yaml").read_text())
 
-    def test_gateway_room_capacity_warns_before_room_omission(self):
-        # Upstream Desktop counts punctuation twice and reserves six bytes for
-        # each BMP Unicode code point; a near-limit projection is not healthy.
-        home = self.instance / "hermes-data"
-        profile = home / "profile.yaml"
+    def write_projection(self, text: str) -> None:
         rooms = {"name:Existing": {"name": "Existing", "roomId": None,
                                    "members": [], "revision": 9,
-                                   "log": [{"id": "m1", "text": "x" * 45_000}]}}
-        profile.write_text(yaml.safe_dump({"ui_meta": {"hermes-bots-groups": {
-            "version": 3, "updatedAt": 1, "rooms": rooms, "deleted": {}}}}))
+                                   "log": [{"id": "m1", "text": text}]}}
+        (self.instance / "hermes-data" / "profile.yaml").write_text(
+            yaml.safe_dump({"ui_meta": {"hermes-bots-groups": {
+                "version": 3, "updatedAt": 1, "rooms": rooms, "deleted": {}}}}))
+
+    def test_gateway_room_capacity_warns_before_room_omission(self):
+        # A new gateway/desktop pair accepts this projection, but an old
+        # Desktop has <4,000 bytes left and may omit rooms without tombstones.
+        self.write_projection("x" * 45_000)
         data, rc = self.run_doc()
         self.assertEqual(rc, 0)  # advisory; current room still present
         rows = findings(data, "desktop_room_capacity")
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["status"], "WARN")
-        self.assertIn("omitted without a tombstone", rows[0]["detail"])
+        self.assertIn("old Desktop (48,000-byte cap", rows[0]["detail"])
+        self.assertIn("omit a room without a tombstone", rows[0]["detail"])
+        self.assertIn("192000", rows[0]["detail"])
+        self.assertIn("262144", rows[0]["detail"])
+        self.assertIn("Installed client/gateway versions", rows[0]["detail"])
         self.assertEqual(findings(data, "desktop_registry")[0]["status"], "UNVERIFIED")
-        rooms["name:Existing"]["log"][0]["text"] = "small"
-        profile.write_text(yaml.safe_dump({"ui_meta": {"hermes-bots-groups": {
-            "version": 3, "updatedAt": 1, "rooms": rooms, "deleted": {}}}}))
+        self.write_projection("small")
         data, rc = self.run_doc()
         self.assertEqual(rc, 0)
         self.assertEqual(findings(data, "desktop_room_capacity")[0]["status"], "PASS")
+
+    def test_gateway_capacity_shows_legacy_gateway_and_new_desktop_separately(self):
+        self.write_projection("x" * 80_000)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 0)
+        row = findings(data, "desktop_room_capacity")[0]
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("old Desktop (48,000-byte cap", row["detail"])
+        self.assertIn("old gateway (65,536-character cap)", row["detail"])
+        self.assertNotIn("new Desktop may omit", row["detail"])
+        self.assertNotIn("new gateway may reject", row["detail"])
+        self.assertIn("other incoming ui_meta keys are unverified", row["detail"])
+        self.write_projection("x" * 186_000)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 0)
+        row = findings(data, "desktop_room_capacity")[0]
+        self.assertEqual(row["status"], "WARN")
+        self.assertIn("old Desktop (48,000-byte cap", row["detail"])
+        self.assertNotIn("new Desktop may omit", row["detail"])
+        self.write_projection("x" * 200_000)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 0)
+        self.assertIn("new Desktop may omit", findings(data, "desktop_room_capacity")[0]["detail"])
+        self.write_projection("x" * 263_000)
+        data, rc = self.run_doc()
+        self.assertEqual(rc, 0)
+        self.assertIn("new gateway may reject", findings(data, "desktop_room_capacity")[0]["detail"])
 
     def test_gateway_size_matches_desktop_separator_and_unicode_reserve(self):
         self.assertEqual(doctor._desktop_gateway_size({"a": "x"}), 10)
         self.assertEqual(doctor._desktop_gateway_size({"a": "é"}), 15)
         self.assertEqual(doctor._desktop_gateway_size({"a": "🎉"}), 21)
+        self.assertEqual(doctor._desktop_gateway_size({"a": "\x7f"}), 15)
+        # Count the full ui_meta incoming wrapper, not just the registry value.
+        registry = {"rooms": {"name:é": {"log": ["\x7f🎉"]}}}
+        self.assertEqual(doctor._gateway_ui_meta_size(registry),
+                         len(json.dumps({"hermes-bots-groups": registry})))
+        self.assertGreater(doctor._gateway_ui_meta_size(registry),
+                           len(json.dumps(registry)))
 
     def test_required_room_seats_need_exact_operator_supplied_identity(self):
         key = "id:room-1"

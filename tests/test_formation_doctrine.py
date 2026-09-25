@@ -121,7 +121,36 @@ class FormationDoctrineTests(unittest.TestCase):
         # changes here require deliberate review, not silent mission drift.
         self.assertEqual(hashlib.sha256(preserved.encode()).hexdigest(),
                          "8068ecbd297582a2b44697ea711ed67cc51ec4323944762caeb8492c7bd09aec")
-        self.assertRegex(self.skill, r"(?m)^version: 1\.3\.0$")
+        self.assertRegex(self.skill, r"(?m)^version: 2\.0\.0$")
+
+    def test_native_surface_fitment_state_machine_and_sparse_learning(self):
+        for document in (self.seed, self.skill):
+            lowered = document.lower()
+            for phrase in ("ephemeral", "kanban", "group chat", "convergence ledger",
+                           "state machine", "authoritative", "special meeting"):
+                with self.subTest(document=document[:40], phrase=phrase):
+                    self.assertIn(phrase, lowered)
+            self.assertIn("STOPPED", document)
+            self.assertIn("VERIFYING", document)
+            self.assertIn("internal artifacts are forbidden", lowered)
+            self.assertIn("private chain-of-thought", lowered)
+        self.assertIn("same failure under unchanged conditions is recorded once", self.seed)
+        self.assertIn("unchanged known failure is denied", self.skill)
+
+    def test_every_soul_inherits_a_substantial_canonical_seed_section(self):
+        start = "<!-- FLEET_SOUL_CORE:START -->"
+        end = "<!-- FLEET_SOUL_CORE:END -->"
+        self.assertEqual(self.seed.count(start), 1)
+        self.assertEqual(self.seed.count(end), 1)
+        inherited = self.seed[self.seed.index(start):self.seed.index(end) + len(end)]
+        self.assertGreater(len(inherited), 10_000)
+        for phrase in ("FRACTAL OODA", "## PURPOSEFUL CONFIDENCE",
+                       "Internal artifacts are forbidden by default",
+                       "Session context and tokens", "observable state machine",
+                       "special meeting"):
+            self.assertIn(phrase, inherited)
+        self.assertIn("deep-distill", self.skill)
+        self.assertIn("100% recovery", self.skill)
 
 
 if __name__ == "__main__":

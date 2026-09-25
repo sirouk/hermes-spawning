@@ -14,6 +14,7 @@ import argparse
 from datetime import datetime, timezone
 import json
 from pathlib import Path
+import re
 import sys
 from typing import Any, Iterable
 
@@ -22,6 +23,18 @@ import yaml
 SCHEMA = 1
 OVERDUE_GRACE_SECONDS = 15 * 60  # Installed Hermes 0.21.4 hermes_cli/cron.py.
 KNOWN_KINDS = frozenset(("once", "interval", "cron"))
+SOURCE_LOCATOR_RE = re.compile(r"^[a-z][a-z0-9+.-]{1,31}:[^\s].*$", re.IGNORECASE)
+ARTIFACT_DIRECTIVES = (
+    re.compile(r"<cycle_dir>|(?:^|[/\\])cycles?[/\\]", re.IGNORECASE),
+    re.compile(r"\b(?:cycle[-_ ]?close|retro|handoff|checkpoint|nowcast|proposal|assessment)"
+               r"\.(?:md|txt|jsonl?)\b", re.IGNORECASE),
+    re.compile(r"\b(?:scheduled|role|cycle|handoff|close|checkpoint|retro)\s+artifact\b",
+               re.IGNORECASE),
+    re.compile(r"\b(?:write|save|produce|publish|harvest(?:ed)?|own)\b.{0,160}"
+               r"\.(?:md|txt|jsonl?)\b", re.IGNORECASE | re.DOTALL),
+    re.compile(r"\bfile-first\s+handoff|\bevidence\s+bundle|\brole\s+packet",
+               re.IGNORECASE),
+)
 
 
 class InputError(ValueError):
@@ -94,20 +107,6 @@ def _jobs(path: Path) -> list[dict]:
     return jobs
 
 
-def _policy(path: Path | None) -> dict[str, list[str]]:
-    if path is None:
-        return {}
-    value = _json_file(path)
-    if not isinstance(value, dict) or value.get("schema") != 1 or set(value) != {"schema", "handoff_profiles"}:
-        raise InputError("policy must have exactly schema=1 and handoff_profiles object")
-    groups = value["handoff_profiles"]
-    if not isinstance(groups, dict) or any(not isinstance(k, str) or not isinstance(v, list)
-                                            or any(not isinstance(n, str) or not n for n in v)
-                                            or len(set(v)) != len(v) for k, v in groups.items()):
-        raise InputError("policy handoff_profiles must map instance names to unique profile-name lists")
-    return groups
-
-
 def _script_issue(script: str, profile_dir: Path) -> str | None:
     # Mirror native path confinement, but never import native code or execute scripts.
     root = (profile_dir / "scripts").resolve()
@@ -120,6 +119,67 @@ def _script_issue(script: str, profile_dir: Path) -> str | None:
     if not target.is_file():
         return "script not found as a regular file in this profile's scripts directory"
     return None
+
+
+def _text_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, list):
+        return [text for item in value for text in _text_values(item)]
+    if isinstance(value, dict):
+        return [text for key, item in value.items() if key != "durable_output"
+                for text in _text_values(item)]
+    return []
+
+
+def _durable_output(value: Any) -> tuple[str, str | None]:
+    """Return the declared class and any schema error."""
+    if value is None:
+        return "none", None
+    if not isinstance(value, dict) or not isinstance(value.get("class"), str):
+        return "invalid", "durable_output must be an object with a class"
+    kind = value["class"]
+    if kind in {"none", "native_state", "convergence_ledger"}:
+        if set(value) != {"class"}:
+            return kind, f"durable_output class {kind} accepts no other fields"
+        return kind, None
+    if kind == "mission_deliverable":
+        if set(value) != {"class", "path", "operator_request"}:
+            return kind, "mission_deliverable needs exactly class, path, and operator_request"
+        path, request = value.get("path"), value.get("operator_request")
+        if not isinstance(path, str) or not path.strip() or "\x00" in path or ".." in Path(path).parts:
+            return kind, "mission_deliverable path must be nonempty and contain no parent traversal"
+        if not isinstance(request, str) or not SOURCE_LOCATOR_RE.fullmatch(request):
+            return kind, "mission_deliverable operator_request must be a stable scheme:locator"
+        return kind, None
+    return kind, "durable_output class must be none, native_state, convergence_ledger, or mission_deliverable"
+
+
+def _artifact_culture(job: dict, profile_dir: Path) -> tuple[str, str]:
+    declared, issue = _durable_output(job.get("durable_output"))
+    if issue:
+        return "FAIL", issue
+    text = "\n".join(_text_values(job))
+    script = job.get("script")
+    if isinstance(script, str) and _script_issue(script, profile_dir) is None:
+        root = (profile_dir / "scripts").resolve()
+        raw = Path(script).expanduser()
+        target = raw.resolve() if raw.is_absolute() else (root / raw).resolve()
+        try:
+            if target.stat().st_size <= 1_000_000:
+                text += "\n" + target.read_text(encoding="utf-8")
+        except (OSError, UnicodeError):
+            pass
+    signals = sorted({pattern.pattern for pattern in ARTIFACT_DIRECTIVES if pattern.search(text)})
+    if signals and declared != "mission_deliverable":
+        return ("FAIL", "active job directs an internal file/artifact workflow; use native Kanban/room "
+                "state and the convergence ledger instead (or explicitly bind a real mission deliverable "
+                "to its operator-request locator)")
+    if signals:
+        return ("PASS", "file output is explicitly declared as an operator-requested mission deliverable; "
+                "runtime behavior and request validity are not verified")
+    return ("PASS", f"no internal artifact-workflow directive found; durable output class is {declared}; "
+            "runtime behavior is not executed")
 
 
 def _job_checks(checks: list[dict], instance: str, profile: str, root: Path,
@@ -176,19 +236,41 @@ def _job_checks(checks: list[dict], instance: str, profile: str, root: Path,
         _row(checks, instance, profile, "last_delivery", "WARN",
              "last delivery failed or adapter ACK did not prove delivery; inspect native job state",
              job_id=job_id)
+    artifact_status, artifact_detail = _artifact_culture(job, root)
+    _row(checks, instance, profile, "artifact_culture", artifact_status,
+         artifact_detail, job_id=job_id)
 
 
-DESKTOP_SYNC_LIMIT = 48_000  # group-chat.ts GROUP_CHAT_SYNC_MAX_BYTES.
-# Warn with headroom for a new 6-seat room and a single post. This is advisory,
-# not a proof that Desktop will drop a specific room on its next sync.
+# Coordinated upstream policy: Desktop group-chat.ts must ship together with
+# gateway methods_profiles.py. Neither installed client nor gateway version is
+# available from this disk-only doctor; old clients may still enforce 48,000
+# and old gateways may still reject incoming ui_meta beyond 65,536 characters.
+DESKTOP_SYNC_LIMIT = 192_000  # group-chat.ts GROUP_CHAT_SYNC_MAX_BYTES (patched).
+LEGACY_DESKTOP_SYNC_LIMIT = 48_000
+GATEWAY_UI_META_LIMIT = 262_144  # methods_profiles.py len(json.dumps(incoming)).
+LEGACY_GATEWAY_UI_META_LIMIT = 65_536
+# Advisory room + post reserve, not a guarantee against future client trimming.
 DESKTOP_SYNC_MIN_HEADROOM = 4_000
 
 
 def _desktop_gateway_size(value: Any) -> int:
-    """groupChatGatewayJsonSize: JSON byte count plus separator/Unicode reserve."""
+    """groupChatGatewayJsonSize: compact JS JSON plus Python escape reserve."""
     compact = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    return sum(1 + (char in ",:") if ord(char) <= 0x7f else
-               6 if ord(char) <= 0xffff else 12 for char in compact)
+    total = 0
+    for char in compact:
+        code = ord(char)
+        if code == 0x7f:  # JS prints DEL literally; Python escapes it as \u007f.
+            total += 6
+        elif code <= 0x7f:
+            total += 1 + (char in ",:")
+        else:
+            total += 6 if code <= 0xffff else 12
+    return total
+
+
+def _gateway_ui_meta_size(registry: dict) -> int:
+    """Gateway's character count for a single-key Desktop ui_meta request."""
+    return len(json.dumps({"hermes-bots-groups": registry}))
 
 
 def _member_ids(room: Any) -> list[str]:
@@ -225,19 +307,37 @@ def _room_check(checks: list[dict], instance: str, profile: str, home: Path,
     _row(checks, instance, profile, "desktop_registry", "UNVERIFIED",
          f"{count} Desktop ui_meta room(s) on disk; client sync, visibility, backend rooms, and delivery not verified")
     if isinstance(registry, dict) and isinstance(rooms, dict):
-        # groupChatSyncEnvelope() can delete a whole room before CAS when even
-        # its final post will not fit; omission needs no tombstone.
+        # groupChatSyncEnvelope() may omit whole rooms without tombstones. The
+        # saved per-gateway projection is not the client's full local state.
         used = _desktop_gateway_size(registry)
+        incoming = _gateway_ui_meta_size(registry)
         headroom = DESKTOP_SYNC_LIMIT - used
+        legacy_headroom = LEGACY_DESKTOP_SYNC_LIMIT - used
+        detail = (f"Saved Desktop projection estimates {used}/{DESKTOP_SYNC_LIMIT} "
+                  f"conservative bytes (headroom {headroom}); single-key gateway "
+                  f"ui_meta incoming estimate {incoming}/{GATEWAY_UI_META_LIMIT} "
+                  "Python JSON characters. Installed client/gateway versions and "
+                  "other incoming ui_meta keys are unverified. ")
+        risks = []
         if headroom < DESKTOP_SYNC_MIN_HEADROOM:
+            risks.append("new Desktop may omit another room without a tombstone")
+        if incoming > GATEWAY_UI_META_LIMIT:
+            risks.append("even a new gateway may reject this incoming ui_meta")
+        if legacy_headroom < DESKTOP_SYNC_MIN_HEADROOM:
+            risks.append(f"old Desktop (48,000-byte cap; headroom {legacy_headroom}) "
+                         "may omit a room without a tombstone")
+        if incoming > LEGACY_GATEWAY_UI_META_LIMIT:
+            risks.append("old gateway (65,536-character cap) may reject this incoming ui_meta")
+        if risks:
             _row(checks, instance, profile, "desktop_room_capacity", "WARN",
-                 f"Desktop gateway projection estimates {used}/{DESKTOP_SYNC_LIMIT} "
-                 f"bytes (headroom {headroom}); another room may be omitted without a tombstone. "
-                 "Back up client state; do not trim unrelated room logs or infer client deletion")
+                 detail + "; ".join(risks) + ". Back up client state; "
+                 "upgrade gateway first, then verify the Desktop version and projection. "
+                 "Do not trim unrelated room logs or infer client deletion")
         else:
             _row(checks, instance, profile, "desktop_room_capacity", "PASS",
-                 f"Desktop gateway projection estimates {used}/{DESKTOP_SYNC_LIMIT} "
-                 f"bytes (headroom {headroom}); future growth and client visibility still unverified")
+                 detail + "Measured projection has at least 4,000 bytes of "
+                 "legacy Desktop headroom; future growth, client visibility and "
+                 "successful writes are still unverified")
     # Connection identity of saved room seats. A Desktop registry id is minted
     # from the connection LABEL the operator typed; it is NEVER derivable from
     # a gateway hostname, URL, or tailnet name, and a rename keeps the old id.
@@ -274,8 +374,7 @@ def _room_check(checks: list[dict], instance: str, profile: str, home: Path,
                  f"{', '.join(unique)}; client rendering and delivery still unverified")
 
 
-def check_instance(instance_dir: Path, handoff_policy: dict[str, list[str]],
-                   now: datetime | None = None,
+def check_instance(instance_dir: Path, now: datetime | None = None,
                    verified_connection_ids: frozenset[str] = frozenset()) -> list[dict]:
     instance_dir = Path(instance_dir)
     if not instance_dir.is_dir():
@@ -283,10 +382,6 @@ def check_instance(instance_dir: Path, handoff_policy: dict[str, list[str]],
     home = instance_dir / "hermes-data"
     profiles = _profile_dirs(home)
     instance = instance_dir.name
-    profile_map = dict(profiles)
-    expected_handoffs = handoff_policy.get(instance, [])
-    if any(name not in profile_map for name in expected_handoffs):
-        raise InputError(f"handoff policy refers to absent profiles in {instance}")
     now = now or datetime.now(timezone.utc)
     checks: list[dict] = []
     for profile, path in profiles:
@@ -299,15 +394,10 @@ def check_instance(instance_dir: Path, handoff_policy: dict[str, list[str]],
              if manifest.is_file() else "no jobs.json; no schedule claim")
         for job in jobs:
             _job_checks(checks, instance, profile, path, job, now)
-        if profile in expected_handoffs:
-            handoff = path / "handoff"
-            ok = handoff.is_dir() and not handoff.is_symlink()
-            _row(checks, instance, profile, "handoff", "PASS" if ok else "FAIL",
-                 "declared local handoff directory exists; writing and routing not tested" if ok
-                 else "declared local handoff directory missing, symlinked, or not a directory")
-        else:
-            _row(checks, instance, profile, "handoff", "UNVERIFIED",
-                 "no explicit file-first handoff policy for this profile; not assumed required")
+        handoff = path / "handoff"
+        if handoff.exists():
+            _row(checks, instance, profile, "artifact_culture", "FAIL",
+                 "legacy handoff path exists; Kanban transitions and room turns are the handoff surface")
         _room_check(checks, instance, profile, path, verified_connection_ids)
     _row(checks, instance, "*", "unknown_outcomes", "UNVERIFIED",
          "live execution DB deliberately not opened; unknown outcomes cannot be ruled out")
@@ -356,15 +446,13 @@ def _required_room_seats(checks: list[dict], instance_dir: Path,
 
 
 def run(*, instance_dir: Path | None = None, instances_dir: Path | None = None,
-        policy_file: Path | None = None, now: datetime | None = None,
-        verified_connection_ids: Iterable[str] = (),
+        now: datetime | None = None, verified_connection_ids: Iterable[str] = (),
         require_room_connection: Iterable[str] = ()) -> tuple[dict, int]:
     report = {"schema": SCHEMA, "read_only": True, "scope": "disk-only-no-db-no-runtime",
               "instances": [], "checks": [], "summary": {"FAIL": 0, "WARN": 0, "UNVERIFIED": 0, "PASS": 0}}
     try:
         if (instance_dir is None) == (instances_dir is None):
             raise InputError("specify exactly one of --instance-dir and --instances-dir")
-        policy = _policy(policy_file)
         if instance_dir is not None:
             paths = [Path(instance_dir)]
         else:
@@ -395,7 +483,7 @@ def run(*, instance_dir: Path | None = None, instances_dir: Path | None = None,
         report["required_room_connections"] = required
         for path in paths:
             report["instances"].append(path.name)
-            report["checks"].extend(check_instance(path, policy, now=now,
+            report["checks"].extend(check_instance(path, now=now,
                                                    verified_connection_ids=verified))
             _required_room_seats(report["checks"], path, required)
         for item in report["checks"]:
@@ -411,7 +499,6 @@ def main(argv: list[str] | None = None) -> int:
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("--instance-dir", type=Path)
     group.add_argument("--instances-dir", type=Path)
-    parser.add_argument("--policy-file", type=Path, help="optional JSON {schema:1,handoff_profiles:{instance:[profile]}}")
     parser.add_argument("--verified-connection-id", action="append", default=[],
                         metavar="ID",
                         help="operator-verified Desktop connection id (repeatable). Read it from the "
@@ -423,7 +510,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--json", action="store_true")
     args = parser.parse_args(argv)
     result, rc = run(instance_dir=args.instance_dir, instances_dir=args.instances_dir,
-                     policy_file=args.policy_file,
                      verified_connection_ids=args.verified_connection_id,
                      require_room_connection=args.require_room_connection)
     if args.json:

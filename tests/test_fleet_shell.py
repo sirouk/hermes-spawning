@@ -76,6 +76,7 @@ fi
 case "$*" in
   *fleet_preflight.py*) printf '{"ok":true}\n'; exit "${MOCK_PREFLIGHT_RC:-0}" ;;
   *fleet_doctor.py*) printf '{"read_only":true}\n'; exit "${MOCK_AUDIT_RC:-0}" ;;
+  *sync_soul_core.py*) printf 'Fleet SOUL core: 1 change(s) across 1 profile(s)\n'; exit 0 ;;
   *'formation_status.py declare '*)
     if [[ "${MOCK_DECLARE_RC:-0}" != 0 ]]; then exit "$MOCK_DECLARE_RC"; fi
     exec /usr/bin/python3 "$@" ;;
@@ -100,20 +101,17 @@ esac
         return self.log.read_text() if self.log.exists() else ""
 
     def test_readonly_fleet_doctor_and_formation_status_dispatch(self):
-        policy = self.repo / "sample policy.json"
-        policy.write_text('{"schema":1,"handoff_profiles":{}}')
         for command in ("fleet-doctor", "formation-status"):
             for scope in ("demo", "all"):
                 for code in (0, 1, 2):
-                    opts = ("--json", "--policy-file", str(policy)) if command == "fleet-doctor" else ()
+                    opts = ("--json",) if command == "fleet-doctor" else ()
                     result = self.run_cli(command, scope, *opts, MOCK_AUDIT_RC=str(code))
                     self.assertEqual(result.returncode, code, (command, scope, result.stderr))
                     self.assertEqual(json.loads(result.stdout), {"read_only": True})
                     call = self.calls().splitlines()[-1]
                     self.assertIn("--instances-dir" if scope == "all" else "--instance-dir", call)
                     if command == "fleet-doctor":
-                        self.assertIn("--policy-file", call)
-                        self.assertIn(str(policy), call)
+                        self.assertIn("--json", call)
             for bad_args in ((), ("../demo",), ("/tmp/nope",)):
                 result = self.run_cli(command, *bad_args)
                 self.assertNotEqual(result.returncode, 0)
@@ -317,7 +315,12 @@ esac
         source_bytes = src.read_bytes()
         unchanged = self.run_cli("install-skills", "demo")
         self.assertEqual(unchanged.returncode, 0, unchanged.stderr)
-        self.assertIn("3 unchanged", unchanged.stdout)
+        managed_skill_count = sum(
+            1 for path in self.repo.joinpath("skills").iterdir()
+            if path.is_dir() and (path / "SKILL.md").is_file()
+        )
+        self.assertIn(f"{managed_skill_count} unchanged", unchanged.stdout)
+        self.assertEqual(self.calls().count("sync_soul_core.py"), 2)
         self.assertFalse((self.instance / ".fleet-skills-history").exists())
         self.assertEqual(src.read_bytes(), source_bytes)
 
