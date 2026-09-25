@@ -159,6 +159,17 @@ live fleet operation and are doctrine, not suggestion.
    select the profile store, so per-persona cron jobs need explicit profile
    scoping to land in the persona's cron store.
 
+
+6. Land results where the operator can review. What exists on disk is
+   invisible until it reaches a user-visible surface. A mutation is not
+   done when the store holds it; it is done when the user can open a
+   surface and see the effect: kanban boards and card movements in the
+   instance's dashboard Kanban tab (tailnet URL, printed by
+   `./hermes-spawn.sh credentials <inst>`), queue/cron state in the
+   dashboard Cron page, deliveries into a group chat the operator reads.
+   If a formation step produced nothing reviewable on one of those
+   surfaces, the step did not count as done regardless of byte checks.
+
 `scripts/fleet-turn.py` on the host encodes rules 1, 2, and 5's stdin rule
 and refuses to launch against a busy session.
 
