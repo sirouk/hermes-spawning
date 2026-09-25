@@ -221,7 +221,11 @@ Desktop's live picker. Compare fresh revisions on *all* projections; a tie
 unions stale seats and a lower revision loses. Read back each projection, then
 ask the operator to verify both rooms under the correct filter and test a real
 member reply. If any room disappears from a gateway projection later, fail
-the gate and investigate; a one-time PASS was not stable evidence.
+the gate and investigate; a one-time PASS was not stable evidence. Check
+`fleet_doctor.py`'s `desktop_room_capacity` warning: the shared Desktop
+projection has a 48,000-byte cap and may silently omit whole rooms even
+without tombstones. Do not erase another fleet's transcript for headroom; fix
+the owner/scope/capacity path before qualifying two new rooms.
 
 Independence first: each persona prepares its current-state assessment
 **before** seeing peers.
