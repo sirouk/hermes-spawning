@@ -64,18 +64,29 @@ new room revision to win over stale client copies, then check Desktop filter,
 all seats, and one member reply. A gateway readback alone is not client proof.
 **Never wipe a container to fix client-synced room members.**
 
-**Capacity gate before any server-side seat write:** the Desktop projection
-uses one shared 48,000-byte envelope for rooms across gateways. Its conservative
-`groupChatGatewayJsonSize` counts JSON separators twice and reserves more than
-UTF-8 for Unicode; simply measuring `len(json.dumps(...))` understates it.
-`groupChatSyncEnvelope` trims older messages and images, then silently omits
-whole rooms if they still do not fit, with **no deletion tombstone**. Run
-`lib/fleet_doctor.py` and inspect `desktop_room_capacity`; below 4,000 bytes
-of headroom is WARN, not proof of future delivery. A one-time CAS/readback is
-not durable under a later Desktop fan-out. Preserve unrelated room logs and
-seek a source-reviewed capacity/scope fix or owner-coordinated recovery, not a
-blind higher revision or a one-room rewrite. Back up the owner's full local
-room state first; server mirrors are compact and cannot replace it.
+**Capacity gate before any server-side seat write:** the coordinated source
+policy budgets one shared **192,000 conservative bytes** in patched Desktop's
+`groupChatGatewayJsonSize` projection and **262,144 Python JSON characters**
+for the patched gateway's full incoming `ui_meta` payload. Unverified installed
+clients may still use **48,000 bytes**; unverified gateways may still use the
+old **65,536-character** payload cap. This source patch does not prove that an
+operator's Mac Desktop has been updated. The estimator doubles JSON separators
+and reserves for Python Unicode escaping, including six bytes for DEL (`\u007f`);
+`len(json.dumps(...))` alone does not estimate the Desktop envelope. The gateway
+counts `len(json.dumps(incoming))`, including the key wrapper and any other
+incoming `ui_meta` keys. `groupChatSyncEnvelope` trims older messages and images,
+then silently omits whole rooms if they still do not fit, with **no deletion
+tombstone**. Run `lib/fleet_doctor.py` and inspect `desktop_room_capacity`;
+under 4,000 bytes of headroom against either Desktop limit is WARN, not proof
+of future delivery. The doctor also warns of old/new gateway cap overruns.
+A one-time CAS/readback is not durable under a later Desktop fan-out. Before
+larger publishes, back up the owner's full local room state and all gateway
+projections; server mirrors are compact and cannot replace it. Upgrade and
+verify the gateway first, then the actual Desktop client; retain old-client
+warnings until its version is confirmed. For rollback, stop larger publishes,
+return the client projection within the old limit, then revert the gateway only
+after incoming writes fit the old cap. Do not trim unrelated room logs, delete
+missing rooms, auto-reconcile, or blindly raise a revision to force the write.
 
 A server-side reseat requires the operator-supplied exact id AND the merge
 rules below, because Desktop reconciles per room by revision

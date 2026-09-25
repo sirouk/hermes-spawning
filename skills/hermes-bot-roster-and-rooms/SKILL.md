@@ -17,16 +17,26 @@ Diagnose retired bots and Group Chat rooms without converting Desktop-native
 rooms to hosted-engine IDs. The read-only registry script never changes rooms.
 This skill distinguishes the profile roster, Desktop room projection, and
 hosted-room engine. **Check the shared projection's capacity before seating
-more rooms:** the upstream Desktop `groupChatSyncEnvelope()` uses a 48,000-byte
-`groupChatGatewayJsonSize()` limit. It trims posts to one per room, then removes
-images, then **omits a whole room** if the envelope is still too large; missing
-keys have no tombstones. `lib/fleet_doctor.py` reports `desktop_room_capacity`
-WARN below 4,000 bytes of headroom (an advisory threshold, not a proof of a
-specific future drop). A previous room write may read back once and then vanish
-on a later publish. Do not delete unrelated transcripts to make space or
-blindly repeat the write. Back up the Desktop owner state, identify the current
-room keys/logs and projection writers, and plan an upstream/owner-coordinated
-capacity fix before retrying. One gateway file is not the rich client store.
+more rooms:** the coordinated upstream policy raises the Desktop
+`groupChatGatewayJsonSize()` envelope to **192,000 conservative bytes** and the
+gateway incoming `ui_meta` cap to **262,144 Python JSON characters**. Older
+installed Desktop clients can still use **48,000 bytes**, and older gateways can
+still cap incoming `ui_meta` at **65,536 characters**. The upstream patch is
+not proof that an operator's Mac Desktop has been updated. Desktop
+`groupChatSyncEnvelope()` trims posts to one per room, then removes images,
+then **omits a whole room** if the envelope is still too large; missing keys
+have no tombstones. `lib/fleet_doctor.py` reports `desktop_room_capacity` WARN
+below 4,000 bytes of old or new Desktop headroom and when either gateway cap
+is exceeded. The gateway estimator includes a single incoming `ui_meta` key
+wrapper; other keys and actual versions remain unverified. A previous room
+write may read back once and then vanish on a later publish. Back up full
+Desktop owner state and all gateway projections before a staged migration:
+upgrade and verify the gateway first, then upgrade and verify the actual
+Desktop client. Keep old-client warnings until verification. For rollback,
+stop larger publishes, bring the client projection within its old cap, then
+revert the gateway only once incoming writes fit the old cap. Do not delete
+unrelated transcripts or missing rooms, auto-reconcile, or blindly repeat a
+write. One gateway file is not the rich client store.
 It does NOT cover scheduled posting into a room (see
 `hermes-group-chat-delivery`) or fleet-wide config sweeps (see
 `hermes-agent-fleet-ops`).

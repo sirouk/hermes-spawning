@@ -108,10 +108,19 @@ Posting on a timer works. **Live visibility on a timer does not, by default.**
   confirms on screen. Do not report a timer post as "delivered to Desktop".
 - Rejected `profiles.configure` with `applied.ui_meta: false` can be a
   stale revision, oversized incoming `ui_meta`, or invalid payload. The
-  installed gateway caps `len(json.dumps(incoming))` at 65536 characters.
-  A rejection is **not** automatically a CAS conflict. Diagnose payload
-  size and fresh projection (including tombstones), then reconcile by exact
-  entry id. Retry only after a relevant change, never replay blindly.
+  coordinated source patch raises the gateway's
+  `len(json.dumps(incoming))` cap from 65,536 to 262,144 characters. This
+  counts the full incoming wrapper and any other `ui_meta` keys; the actual
+  installed gateway version must be checked. Patched Desktop uses a separate
+  192,000-byte conservative envelope, but an old client still budgets 48,000
+  bytes and can silently omit rooms. Do **not** assume an operator's Mac has
+  the patch. Back up the full client state and projections; upgrade/verify
+  gateway first, then Desktop, and retain old-client warnings until confirmed.
+  On rollback, stop larger publishes and restore old-client headroom before
+  reverting the gateway (incoming writes must fit its old cap). A rejection
+  is **not** automatically a CAS conflict. Diagnose payload size and fresh
+  projection (including tombstones), then reconcile by exact entry id. Do
+  not delete missing rooms, auto-reconcile or blindly replay a write.
 
 ## Tombstones and deletion
 

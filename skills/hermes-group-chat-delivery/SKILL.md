@@ -75,7 +75,16 @@ Before wiring anything, **measure the real room live**: read
 key, `revision`, `len(log)`, and member roster. For a Desktop room, verify
 every saved member's `connectionId` against the operator's affected Desktop
 connection registry; the gateway hostname, URL and current connection label
-are not the ID. A room with `local` seats cannot pass a remote gateway filter;
+are not the ID. Before adding rooms/posts, check `lib/fleet_doctor.py`'s
+`desktop_room_capacity`: a coordinated source patch targets 192,000
+conservative Desktop bytes plus 262,144 Python JSON characters for incoming
+gateway `ui_meta`, but old clients still cap at 48,000 bytes and old gateways
+at 65,536 characters. The source patch does not prove a Mac Desktop upgrade.
+Back up full client state and every gateway projection; upgrade/verify gateway
+first, then the actual Desktop client. Keep old-client warnings until verified.
+For rollback stop large publishes, restore old-client headroom, then revert
+gateway once incoming writes fit its old cap. Never delete missing rooms or
+auto-reconcile. A room with `local` seats cannot pass a remote gateway filter;
 a guessed ID creates unreachable ghosts. Use
 `hermes-bot-roster-and-rooms` and its read-only `--require-room-connection`
 check before scheduling delivery. A server PASS is not a member turn or human
@@ -517,8 +526,9 @@ HERMES_HOME=/opt/data/profiles/<profile> python -c \
   `sys.executable`, not the script's shebang.
 - **Do not put credentials or unverified "latest report" claims into the
   payload.** The room adapter validates schema; it cannot prove provenance.
-  Bind content to verified artifacts upstream (exact execution IDs + bytes),
-  and label stale evidence as stale.
+  Bind content to authoritative source or native-event locators upstream
+  (including exact execution IDs when relevant), and label stale evidence as
+  stale. Do not create a report or evidence file merely to support a room turn.
 - **Log scanning is bounded** (e.g. 100 pages x 500 events). Hitting the
   budget must BLOCK, never treat a truncated transcript as absence.
 - **Re-measure before re-asking.** Room `revision`/log length move fast; a
