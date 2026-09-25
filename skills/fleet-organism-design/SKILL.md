@@ -148,15 +148,16 @@ live fleet operation and are doctrine, not suggestion.
    writer saw. After each mutation, read the raw store (for example
    `cron/jobs.json`, the board store, the profile store) and diff bytes;
    `hermes cron list` alone is not evidence of persistence.
-5. CLI semantics worth memorizing: kanban takes `--board` BEFORE the action
-   and the card title is positional (no `--title` flag); cron `--repeat` is
-   an integer count and the cron expression is the positional argument;
-   `--no-agent` requires `--script`, whose path resolves relative to
-   `~/.hermes/scripts`; `--workdir` must be an existing directory and does
-   not choose the profile store, so per-persona cron jobs need profile
-   scoping at creation; `--query-file <path>` resolves INSIDE the container,
-   so send prompts through stdin instead: `docker exec -i ... --query-file -`
-   with the file piped in.
+5. Canonical CLI semantics come from the bundled `hermes-agent` skill
+   (`skills/autonomous-ai-agents/hermes-agent` in every install, routing to
+   its `references/` cards and the docs index at
+   `hermes-agent.nousresearch.com/docs`); load that first rather than
+   re-deriving syntax. The deltas below are verified gaps it does not
+   document: `--query-file <path>` resolves INSIDE the container, so pipe
+   prompts over stdin (`docker exec -i ... --query-file -` with the file
+   redirected); cron `--no-agent` requires `--script`; `--workdir` does not
+   select the profile store, so per-persona cron jobs need explicit profile
+   scoping to land in the persona's cron store.
 
 `scripts/fleet-turn.py` on the host encodes rules 1, 2, and 5's stdin rule
 and refuses to launch against a busy session.
